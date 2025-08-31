@@ -7,16 +7,16 @@ import re
 from datetime import date
 from sqlalchemy import create_engine, text
 
-st.set_page_config(page_title="ServicePack – DB (v3.1 FIX)", layout="wide")
-st.title("ServicePack – Bază de date produse & rapoarte (v3.1 FIX)")
+st.set_page_config(page_title="ServicePack – DB (v3.1 FIX2)", layout="wide")
+st.title("ServicePack – Bază de date produse & rapoarte (v3.1 FIX2)")
 
-st.caption("Persistență în Postgres (Supabase/Neon). Setează `DB_URL` în Streamlit Secrets. Include CRUD manual.")
+st.caption("Persistență în Postgres (Supabase/Neon). Setează DB_URL în Streamlit Secrets. Include CRUD manual.")
 
 # ---------------- Helpers ----------------
 def get_engine():
     db_url = st.secrets.get("DB_URL") or st.session_state.get("DB_URL")
     if not db_url:
-        st.warning("Nu ai setat `DB_URL` în Secrets. Poți seta temporar mai jos.")
+        st.warning("Nu ai setat DB_URL în Secrets. Poți seta temporar mai jos.")
         db_url = st.text_input("DB_URL (temporar, sesiunea curentă)", type="password")
         if db_url:
             st.session_state["DB_URL"] = db_url
@@ -73,9 +73,8 @@ def run_migrations(engine):
     CREATE INDEX IF NOT EXISTS idx_moves_period ON stock_moves(period_start, period_end);
     '''
     with engine.begin() as conn:
-        for stmt in ddl.split(";
-
-"):
+        # split by semicolon to execute individual statements
+        for stmt in ddl.split(";"):
             s = stmt.strip()
             if s:
                 conn.execute(text(s))
@@ -256,7 +255,7 @@ with tabs[0]:
 # ---------------- Tab 1: Import produse ----------------
 with tabs[1]:
     st.subheader("📦 Import produse în DB (bulk din Excel)")
-    st.caption("Așteptat: coloanele tale A..R. `grup_sku` se va seta pe tab-ul Mapare.")
+    st.caption("Așteptat: coloanele tale A..R. grup_sku se va seta pe tab-ul Mapare.")
     up_prod = st.file_uploader("Excel produse (.xlsx)", type=["xlsx"], key="prodfile_db")
     if engine and up_prod is not None:
         raw = pd.read_excel(up_prod, sheet_name=0)
@@ -373,7 +372,7 @@ with tabs[2]:
 
 # ---------------- Tab 3: Mapare grup_sku ----------------
 with tabs[3]:
-    st.subheader("🧩 Mapare `grup_sku` în DB (pe nume normalizat)")
+    st.subheader("🧩 Mapare grup_sku în DB (pe nume normalizat)")
     if engine:
         prod = pd.read_sql("select * from products", engine)
         prod["name_key"] = prod["name_key"].fillna(prod["name"].map(norm_name_value))

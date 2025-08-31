@@ -4,9 +4,9 @@ import pandas as pd
 import numpy as np
 from io import BytesIO
 
-st.set_page_config(page_title="ServicePack – Produse, Mișcări, Recomandări (v2.1)", layout="wide")
-st.title("ServicePack – Produse, Mișcări & Recomandări (v2.1)")
-st.caption("Fix: separare chei Streamlit pentru upload vs. DataFrame + validări robuste.")
+st.set_page_config(page_title="ServicePack – v2.2", layout="wide")
+st.title("ServicePack – Produse, Mișcări & Recomandări (v2.2)")
+st.caption("Fix: citire SmartBill mai tolerantă (și pentru exportul 30 zile fără 'stoc_final').")
 
 def to_num(s):
     return pd.to_numeric(s, errors="coerce")
@@ -24,9 +24,8 @@ def ffill_merged(df, name_cols=("nume","name","denumire","produs")):
 
 def import_products_excel(file) -> pd.DataFrame:
     raw = pd.read_excel(file, sheet_name=0)
-    raw = raw.loc[:, ~raw.columns.astype(str).str.contains("^Unnamed", case=False)]
-    raw = clean_cols(raw)
-    raw = ffill_merged(raw)
+    raw = raw.loc[:, ~raw.columns.astype(str).str.contains("^unnamed", case=False)]
+    raw = clean_cols(raw); raw = ffill_merged(raw)
     def find_col(cands):
         for c in cands:
             if c in raw.columns: return c
@@ -64,36 +63,65 @@ def import_products_excel(file) -> pd.DataFrame:
     df["grup_sku"] = np.nan
     return df
 
+def pick_col(cols, prefer_contains, fallback_index=None):
+    for c in cols:
+        if prefer_contains in c: return c
+    if fallback_index is not None and len(cols) > fallback_index:
+        return cols[fallback_index]
+    return None
+
 def smartbill_read(file):
     try:
         df = pd.read_excel(file, sheet_name=0, header=1)
     except Exception:
         df = pd.read_excel(file, sheet_name=0, header=0)
-    df = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed", case=False)]
+    df = df.loc[:, ~df.columns.astype(str).str.contains("^unnamed", case=False)]
     df = clean_cols(df)
+
+    cols = list(df.columns)
+
+    # Detect produs & cod
     c_prod = None
-    for name in ["produs", "denumire", "nume"]:
+    for name in ["produs","denumire","nume"]:
         if name in df.columns: c_prod = name; break
-    c_cod = "cod" if "cod" in df.columns else None
+    if c_prod is None:
+        c_prod = pick_col(cols, "produs", 0) or cols[0]
+
+    c_cod = None
+    for c in cols:
+        if "cod" == c or " cod " in f" {c} " or "cod " in c or " cod" in c:
+            c_cod = c; break
+    if c_cod is None:
+        # assume second column is code if present
+        c_cod = cols[1] if len(cols) >= 2 else cols[0]
+
+    # Numeric columns
     cand = {k: None for k in ["stoc_initial","intrari","iesiri","stoc_final"]}
-    for col in df.columns:
+    for col in cols:
         low = col
-        if "stoc" in low and "initial" in low and not cand["stoc_initial"]: cand["stoc_initial"]=col
-        if "intrari" in low and not cand["intrari"]: cand["intrari"]=col
-        if "iesiri" in low or "ieșiri" in low:
-            if not cand["iesiri"]: cand["iesiri"]=col
-        if "stoc" in low and "final" in low and not cand["stoc_final"]: cand["stoc_final"]=col
-    if c_prod is None and len(df.columns)>=7: c_prod = df.columns[0]
-    if c_cod is None and len(df.columns)>=7: c_cod = df.columns[1]
-    if cand["stoc_initial"] is None and len(df.columns)>=7: cand["stoc_initial"]=df.columns[3]
-    if cand["intrari"] is None and len(df.columns)>=7: cand["intrari"]=df.columns[4]
-    if cand["iesiri"] is None and len(df.columns)>=7: cand["iesiri"]=df.columns[5]
-    if cand["stoc_final"] is None and len(df.columns)>=7: cand["stoc_final"]=df.columns[6]
+        if "stoc" in low and "initial" in low and cand["stoc_initial"] is None: cand["stoc_initial"]=col
+        if "intrari" in low and cand["intrari"] is None: cand["intrari"]=col
+        if ("iesiri" in low or "ieșiri" in low) and cand["iesiri"] is None: cand["iesiri"]=col
+        if "stoc" in low and "final" in low and cand["stoc_final"] is None: cand["stoc_final"]=col
+
+    # Fallbacks for short exports (5 columns)
+    if cand["stoc_initial"] is None and len(cols) >= 3: cand["stoc_initial"] = cols[2]
+    if cand["intrari"] is None and len(cols) >= 4: cand["intrari"] = cols[3]
+    if cand["iesiri"] is None and len(cols) >= 5: cand["iesiri"] = cols[4]
+    # stoc_final may be missing in 30-day export → default 0 later
+
     clean = pd.DataFrame()
     clean["cod"] = df[c_cod].astype(str).str.strip()
     clean["produs"] = df[c_prod].astype(str).str.strip()
-    for k in ["stoc_initial","intrari","iesiri","stoc_final"]:
-        clean[k] = to_num(df[cand[k]])
+    clean["stoc_initial"] = to_num(df[cand["stoc_initial"]]) if cand["stoc_initial"] in df.columns else 0
+    clean["intrari"] = to_num(df[cand["intrari"]]) if cand["intrari"] in df.columns else 0
+    clean["iesiri"] = to_num(df[cand["iesiri"]]) if cand["iesiri"] in df.columns else 0
+    if cand["stoc_final"] in df.columns:
+        clean["stoc_final"] = to_num(df[cand["stoc_final"]])
+    else:
+        # dacă nu există, îl aproximăm: stoc_final ~= stoc_initial + intrari - iesiri (nu perfect, dar evită erori)
+        clean["stoc_final"] = (clean["stoc_initial"] + clean["intrari"] - clean["iesiri"]).clip(lower=0)
+
     g = clean.groupby(["cod","produs"], as_index=False).agg(
         stoc_initial=("stoc_initial","max"),
         intrari=("intrari","sum"),
@@ -111,7 +139,7 @@ def export_excel(df: pd.DataFrame, filename: str, sheet="Sheet1"):
 tabs = st.tabs(["📦 Produse", "🔁 Mișcări SmartBill", "🧩 Mapare grup_sku", "📊 Recomandări"])
 
 with tabs[0]:
-    st.subheader("Import fișier produse (Excel A..R)")
+    st.subheader("Import fișier produse (Excel)")
     up_prod = st.file_uploader("Încarcă Excel produse", type=["xlsx"], key="prodfile")
     if up_prod is not None:
         dfp = import_products_excel(up_prod)

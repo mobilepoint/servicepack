@@ -4,9 +4,9 @@ import pandas as pd
 import numpy as np
 from io import BytesIO
 
-st.set_page_config(page_title="ServicePack – Produse, Mișcări, Recomandări (v2)", layout="wide")
-st.title("ServicePack – Produse, Mișcări & Recomandări (v2)")
-st.caption("• Import fișier produse (A..R) • Import SmartBill (an + 30 zile) • Mapare grup_sku = SKU din SmartBill • Recomandări pe grup • Export master actualizat")
+st.set_page_config(page_title="ServicePack – Produse, Mișcări, Recomandări (v2.1)", layout="wide")
+st.title("ServicePack – Produse, Mișcări & Recomandări (v2.1)")
+st.caption("Fix: separare chei Streamlit pentru upload vs. DataFrame + validări robuste.")
 
 def to_num(s):
     return pd.to_numeric(s, errors="coerce")
@@ -27,16 +27,13 @@ def import_products_excel(file) -> pd.DataFrame:
     raw = raw.loc[:, ~raw.columns.astype(str).str.contains("^Unnamed", case=False)]
     raw = clean_cols(raw)
     raw = ffill_merged(raw)
-
     def find_col(cands):
         for c in cands:
             if c in raw.columns: return c
         return None
-
     df = pd.DataFrame()
     df["name"] = raw.get(find_col(["nume","name","denumire","produs"]), pd.Series(dtype="object")).astype(str).str.strip()
     df["code"] = raw.get(find_col(["cod","sku","cod.1","product code","id"]), pd.Series(dtype="object")).astype(str).str.strip()
-
     df["purchase_price_no_vat"] = to_num(raw.get(find_col(["pret intrare fara tva","pret achizitie","pret achiziție fara tva","pret achiziție"]), np.nan))
     df["purchase_price_with_vat"] = to_num(raw.get(find_col(["pret intrare cu tva","pret achizitie cu tva"]), np.nan))
     df["sale_price_no_vat"] = to_num(raw.get(find_col(["pret vanzare fara tva","pret vânzare fara tva","pret vanzare fara","pret fara tva"]), np.nan))
@@ -44,7 +41,6 @@ def import_products_excel(file) -> pd.DataFrame:
     df["sale_price_site_109"] = to_num(raw.get(find_col(["pret vanzare cu tva x 1,09","x1.09","pret vanzare 1.09","pret site 1.09","x1,09"]), np.nan))
     df["profit_lei"] = to_num(raw.get(find_col(["profit in lei","profit lei","profit"]), np.nan))
     df["profit_pct"] = to_num(raw.get(find_col(["profit in procente","profit %","profit procente"]), np.nan))
-
     for k, aliases in {
         "gsmnet":["gsmnet","pret concurenta gsmnet","pret gsmnet"],
         "moka":["moka","pret concurenta moka","pret moka"],
@@ -54,19 +50,16 @@ def import_products_excel(file) -> pd.DataFrame:
         "distrizone":["distrizone","pret concurenta distrizone"],
     }.items():
         df[f"competitor_{k}"] = to_num(raw.get(find_col(aliases), np.nan))
-
-    # derive
     df["purchase_price_with_vat"] = np.where(df["purchase_price_with_vat"].isna() & df["purchase_price_no_vat"].notna(),
-                                               df["purchase_price_no_vat"] * 1.21, df["purchase_price_with_vat"])
+                                             df["purchase_price_no_vat"] * 1.21, df["purchase_price_with_vat"])
     df["sale_price_no_vat"] = np.where(df["sale_price_no_vat"].isna() & df["sale_price_with_vat"].notna(),
-                                         df["sale_price_with_vat"] / 1.21, df["sale_price_no_vat"])
+                                       df["sale_price_with_vat"] / 1.21, df["sale_price_no_vat"])
     df["sale_price_site_109"] = np.where(df["sale_price_site_109"].isna() & df["sale_price_with_vat"].notna(),
-                                           df["sale_price_with_vat"] * 1.09, df["sale_price_site_109"])
+                                         df["sale_price_with_vat"] * 1.09, df["sale_price_site_109"])
     df["profit_lei"] = np.where(df["profit_lei"].isna() & df["sale_price_no_vat"].notna() & df["purchase_price_no_vat"].notna(),
-                                  df["sale_price_no_vat"] - df["purchase_price_no_vat"], df["profit_lei"])
+                                df["sale_price_no_vat"] - df["purchase_price_no_vat"], df["profit_lei"])
     df["profit_pct"] = np.where(df["profit_pct"].isna() & df["purchase_price_no_vat"].gt(0) & df["sale_price_no_vat"].notna(),
-                                  (df["sale_price_no_vat"] - df["purchase_price_no_vat"]) / df["purchase_price_no_vat"] * 100, df["profit_pct"])
-
+                                (df["sale_price_no_vat"] - df["purchase_price_no_vat"]) / df["purchase_price_no_vat"] * 100, df["profit_pct"])
     df = df[df["code"].str.len() > 0].copy()
     df["grup_sku"] = np.nan
     return df
@@ -78,7 +71,6 @@ def smartbill_read(file):
         df = pd.read_excel(file, sheet_name=0, header=0)
     df = df.loc[:, ~df.columns.astype(str).str.contains("^Unnamed", case=False)]
     df = clean_cols(df)
-
     c_prod = None
     for name in ["produs", "denumire", "nume"]:
         if name in df.columns: c_prod = name; break
@@ -91,20 +83,17 @@ def smartbill_read(file):
         if "iesiri" in low or "ieșiri" in low:
             if not cand["iesiri"]: cand["iesiri"]=col
         if "stoc" in low and "final" in low and not cand["stoc_final"]: cand["stoc_final"]=col
-
     if c_prod is None and len(df.columns)>=7: c_prod = df.columns[0]
     if c_cod is None and len(df.columns)>=7: c_cod = df.columns[1]
     if cand["stoc_initial"] is None and len(df.columns)>=7: cand["stoc_initial"]=df.columns[3]
     if cand["intrari"] is None and len(df.columns)>=7: cand["intrari"]=df.columns[4]
     if cand["iesiri"] is None and len(df.columns)>=7: cand["iesiri"]=df.columns[5]
     if cand["stoc_final"] is None and len(df.columns)>=7: cand["stoc_final"]=df.columns[6]
-
     clean = pd.DataFrame()
     clean["cod"] = df[c_cod].astype(str).str.strip()
     clean["produs"] = df[c_prod].astype(str).str.strip()
     for k in ["stoc_initial","intrari","iesiri","stoc_final"]:
         clean[k] = to_num(df[cand[k]])
-
     g = clean.groupby(["cod","produs"], as_index=False).agg(
         stoc_initial=("stoc_initial","max"),
         intrari=("intrari","sum"),
@@ -123,7 +112,6 @@ tabs = st.tabs(["📦 Produse", "🔁 Mișcări SmartBill", "🧩 Mapare grup_sk
 
 with tabs[0]:
     st.subheader("Import fișier produse (Excel A..R)")
-    st.caption("A: NUME • B: COD • C: PRET INTRARE FARA TVA • D: C*1.21 • E: F/1.21 • F: PRET VANZARE CU TVA • G: F*1.09 • H: E-C • I: ((E-C)/C)*100 • M..R: prețuri concurență")
     up_prod = st.file_uploader("Încarcă Excel produse", type=["xlsx"], key="prodfile")
     if up_prod is not None:
         dfp = import_products_excel(up_prod)
@@ -136,28 +124,30 @@ with tabs[1]:
     st.subheader("Import mișcări SmartBill (an + 30 zile)")
     c1, c2 = st.columns(2)
     with c1:
-        up_all = st.file_uploader("Anul în curs (.xlsx)", type=["xlsx"], key="moves_all")
+        up_all_file = st.file_uploader("Anul în curs (.xlsx)", type=["xlsx"], key="moves_all_file")
     with c2:
-        up_30 = st.file_uploader("Ultimele 30 zile (.xlsx)", type=["xlsx"], key="moves_30")
+        up_30_file = st.file_uploader("Ultimele 30 zile (.xlsx)", type=["xlsx"], key="moves_30_file")
 
-    if up_all is not None:
-        df_all = smartbill_read(up_all)
-        st.session_state["moves_all"] = df_all
+    if up_all_file is not None:
+        df_all = smartbill_read(up_all_file)
+        st.session_state["moves_all_df"] = df_all
         st.success(f"An în curs: {len(df_all)} rânduri consolidate.")
         st.dataframe(df_all.head(20), use_container_width=True)
-    if up_30 is not None:
-        df_30 = smartbill_read(up_30)
-        st.session_state["moves_30"] = df_30
+    if up_30_file is not None:
+        df_30 = smartbill_read(up_30_file)
+        st.session_state["moves_30_df"] = df_30
         st.success(f"Ultimele 30 zile: {len(df_30)} rânduri consolidate.")
         st.dataframe(df_30.head(20), use_container_width=True)
 
 with tabs[2]:
     st.subheader("Mapare grup_sku = SKU din SmartBill + completare produse lipsă")
-    if not all(k in st.session_state for k in ["products_df", "moves_all"]):
-        st.info("Încarcă fișierul de produse (tab 1) și mișcările pe tot anul (tab 2)." )
+    have_prod = isinstance(st.session_state.get("products_df"), pd.DataFrame)
+    have_all = isinstance(st.session_state.get("moves_all_df"), pd.DataFrame)
+    if not (have_prod and have_all):
+        st.info("Încarcă fișierul de produse (tab 1) și mișcările pe tot anul (tab 2).")
     else:
         dfp = st.session_state["products_df"].copy()
-        m_all = st.session_state["moves_all"].copy()
+        m_all = st.session_state["moves_all_df"].copy()
 
         prod_codes = set(dfp["code"])
         missing = m_all[~m_all["cod"].isin(prod_codes)].copy()
@@ -195,16 +185,19 @@ with tabs[2]:
         st.session_state["products_df"] = dfp
         st.success(f"Mapare finalizată. Adăugate {len(add_rows)} SKU-uri noi din SmartBill. Grupuri setate pe nume comun.")
         st.dataframe(dfp.head(50), use_container_width=True)
-        export_excel(dfp, "master_actualizat_cu_grupuri.xlsx", "produse" )
+        export_excel(dfp, "master_actualizat_cu_grupuri.xlsx", "produse")
 
 with tabs[3]:
     st.subheader("Recomandări pe grup_sku")
-    if not all(k in st.session_state for k in ["products_df","moves_all","moves_30"]):
+    have_prod = isinstance(st.session_state.get("products_df"), pd.DataFrame)
+    have_all = isinstance(st.session_state.get("moves_all_df"), pd.DataFrame)
+    have_30 = isinstance(st.session_state.get("moves_30_df"), pd.DataFrame)
+    if not (have_prod and have_all and have_30):
         st.info("Încarcă toate fișierele și rulează maparea din tabul anterior.")
     else:
         dfp = st.session_state["products_df"].copy()
-        m_all = st.session_state["moves_all"].copy()
-        m_30 = st.session_state["moves_30"].copy()
+        m_all = st.session_state["moves_all_df"].copy()
+        m_30 = st.session_state["moves_30_df"].copy()
 
         code_to_group = dfp.set_index("code")["grup_sku"].to_dict()
         m_all["grup_sku"] = m_all["cod"].map(code_to_group)

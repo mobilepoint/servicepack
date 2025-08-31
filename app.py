@@ -356,4 +356,4 @@ with tabs[2]:
         out["product_name"] = df[c_prod].astype(str).str.strip() if c_prod else ""
         out["stoc_initial"] = pd.to_numeric(df[c_stoci], errors="coerce") if c_stoci else 0
         out["intrari"] = pd.to_numeric(df[c_intrari], errors="coerce") if c_intrari else 0
-        out["iesiri"] = pd.to_numeric(df[c_iesiri], errors="coerce
+        out["iesiri"] = pd.to_numeric(df[c_iesiri], errors="coerce")

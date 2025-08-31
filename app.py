@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -7,10 +6,11 @@ import re
 from datetime import date
 from sqlalchemy import create_engine, text
 
-st.set_page_config(page_title="ServicePack – DB (v3.1 FIX2)", layout="wide")
-st.title("ServicePack – Bază de date produse & rapoarte (v3.1 FIX2)")
+st.set_page_config(page_title="ServicePack – DB (v3.1 FIX3)", layout="wide")
+st.title("ServicePack – Bază de date produse & rapoarte (v3.1 FIX3)")
 
-st.caption("Persistență în Postgres (Supabase/Neon). Setează DB_URL în Streamlit Secrets. Include CRUD manual.")
+st.caption("Persistență în Postgres (Neon/Supabase). Auto-migrations ON, CRUD manual, importuri, mapare, rapoarte.")
+
 
 # ---------------- Helpers ----------------
 def get_engine():
@@ -30,6 +30,7 @@ def get_engine():
     except Exception as e:
         st.error(f"Conexiune DB eșuată: {e}")
         return None
+
 
 def run_migrations(engine):
     ddl = '''
@@ -73,11 +74,11 @@ def run_migrations(engine):
     CREATE INDEX IF NOT EXISTS idx_moves_period ON stock_moves(period_start, period_end);
     '''
     with engine.begin() as conn:
-        # split by semicolon to execute individual statements
-        for stmt in ddl.split(";"):
+        for stmt in ddl.split(';'):
             s = stmt.strip()
             if s:
                 conn.execute(text(s))
+
 
 def norm_name_value(x: str) -> str:
     if x is None:
@@ -85,6 +86,7 @@ def norm_name_value(x: str) -> str:
     x = str(x).strip().lower()
     x = re.sub(r"\s+", " ", x)
     return x
+
 
 def to_num_or_none(x):
     if x is None or str(x).strip() == "":
@@ -94,20 +96,26 @@ def to_num_or_none(x):
     except Exception:
         return None
 
+
 def to_num(s):
     return pd.to_numeric(s, errors="coerce")
 
+
 def norm_name_series(s: pd.Series) -> pd.Series:
     return s.fillna("").map(norm_name_value)
+
 
 # ---------------- DB boot ----------------
 st.sidebar.header("Bază de date")
 engine = get_engine()
 if engine:
-    st.sidebar.success("Conexiune OK")
-    if st.sidebar.button("🔧 Creează/Actualizează tabele"):
+    # Auto-migrations on startup
+    try:
         run_migrations(engine)
-        st.sidebar.success("Tabele OK.")
+        st.sidebar.success("Conexiune OK • Tabele verificate.")
+    except Exception as e:
+        st.sidebar.error(f"Eroare migrații: {e}")
+
 
 tabs = st.tabs([
     "✏️ Produse (add/edit)",
@@ -117,13 +125,13 @@ tabs = st.tabs([
     "📊 Rapoarte & Recomandări",
 ])
 
+
 # ---------------- Tab 0: CRUD ----------------
 with tabs[0]:
     st.subheader("✏️ Adaugă / Editează produse în DB")
     if not engine:
         st.info("Configurează mai întâi conexiunea la DB în sidebar.")
     else:
-        run_migrations(engine)
         with st.expander("🔎 Caută produse"):
             q = st.text_input("Căutare după nume sau cod", value="")
             sql = "select code, name, grup_sku, purchase_price_no_vat, sale_price_no_vat from products"
@@ -132,8 +140,11 @@ with tabs[0]:
                 sql += " where lower(name) like :q or lower(code) like :q"
                 params["q"] = f"%{q.lower()}%"
             sql += " order by name limit 500"
-            df_list = pd.read_sql(text(sql), engine, params=params)
-            st.dataframe(df_list, use_container_width=True)
+            try:
+                df_list = pd.read_sql(text(sql), engine, params=params)
+                st.dataframe(df_list, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Nu pot lista produse încă: {e}")
 
         st.markdown("---")
         colA, colB = st.columns(2)
@@ -207,7 +218,11 @@ with tabs[0]:
 
             code_target = st.session_state.get("__editing_code__")
             if code_target:
-                row = pd.read_sql(text("select * from products where code=:c"), engine, params={"c": code_target})
+                try:
+                    row = pd.read_sql(text("select * from products where code=:c"), engine, params={"c": code_target})
+                except Exception as e:
+                    st.error(f"Nu pot citi produsul: {e}")
+                    row = pd.DataFrame()
                 if row.empty:
                     st.warning(f"Nu am găsit COD={code_target}")
                 else:
@@ -252,28 +267,34 @@ with tabs[0]:
                             st.success(f"Șters {code_target}")
                             st.session_state.pop("__editing_code__", None)
 
+
 # ---------------- Tab 1: Import produse ----------------
 with tabs[1]:
     st.subheader("📦 Import produse în DB (bulk din Excel)")
-    st.caption("Așteptat: coloanele tale A..R. grup_sku se va seta pe tab-ul Mapare.")
+    st.caption("Așteptat: coloanele tale A..R. `grup_sku` se va seta pe tab-ul Mapare.")
     up_prod = st.file_uploader("Excel produse (.xlsx)", type=["xlsx"], key="prodfile_db")
     if engine and up_prod is not None:
         raw = pd.read_excel(up_prod, sheet_name=0)
         raw = raw.loc[:, ~raw.columns.astype(str).str.contains("^Unnamed", case=False)]
         cols = raw.columns.astype(str).str.strip().str.lower().str.replace("\n"," ", regex=True)
         raw.columns = cols
+
         def find_col(cands):
             for c in cands:
-                if c in raw.columns: return c
+                if c in raw.columns:
+                    return c
             return None
+
         df = pd.DataFrame()
         df["name"] = raw.get(find_col(["nume","name","denumire","produs"]), pd.Series(dtype="object")).astype(str).str.strip()
         df["code"] = raw.get(find_col(["cod","sku","cod.1","product code","id"]), pd.Series(dtype="object")).astype(str).str.strip()
         df["purchase_price_no_vat"] = to_num(raw.get(find_col(["pret intrare fara tva","pret achizitie","pret achiziție fara tva","pret achiziție"]), np.nan))
         df["sale_price_no_vat"] = to_num(raw.get(find_col(["pret vanzare fara tva","pret vânzare fara tva","pret fara tva"]), np.nan))
+
         df = df[df["code"].str.len() > 0].copy()
         df["name_key"] = norm_name_series(df["name"])
         rows = df.to_dict("records")
+
         run_migrations(engine)
         upsert_sql = text(
             "INSERT INTO products (code, name, name_key, purchase_price_no_vat, sale_price_no_vat, updated_at) "
@@ -286,6 +307,7 @@ with tabs[1]:
         with engine.begin() as conn:
             conn.execute(upsert_sql, rows)
         st.success(f"Import/actualizare produse: {len(rows)} în DB.")
+
 
 # ---------------- Tab 2: Import mișcări ----------------
 with tabs[2]:
@@ -311,22 +333,25 @@ with tabs[2]:
                 c_prod = n
                 break
         c_cod = "cod" if "cod" in df.columns else df.columns[1]
+
         def find(kws):
             for c in df.columns:
                 low = c
                 if all(kw in low for kw in kws):
                     return c
             return None
-        c_stoci = find(["stoc","initial"]) or (df.columns[2] if len(df.columns)>2 else None)
-        c_intrari = "intrari" if "intrari" in df.columns else (df.columns[3] if len(df.columns)>3 else None)
+
+        c_stoci = find(["stoc","initial"]) or (df.columns[2] if len(df.columns) > 2 else None)
+        c_intrari = "intrari" if "intrari" in df.columns else (df.columns[3] if len(df.columns) > 3 else None)
         c_iesiri = None
         for key in ["iesiri","ieșiri"]:
             if key in df.columns:
                 c_iesiri = key
                 break
-        if c_iesiri is None and len(df.columns)>4:
+        if c_iesiri is None and len(df.columns) > 4:
             c_iesiri = df.columns[4]
         c_stocf = find(["stoc","final"])
+
         out = pd.DataFrame()
         out["code"] = df[c_cod].astype(str).str.strip()
         out["product_name"] = df[c_prod].astype(str).str.strip() if c_prod else ""
@@ -370,29 +395,49 @@ with tabs[2]:
         if total:
             st.success(f"Importate {total} rânduri în stock_moves.")
 
+
 # ---------------- Tab 3: Mapare grup_sku ----------------
 with tabs[3]:
-    st.subheader("🧩 Mapare grup_sku în DB (pe nume normalizat)")
+    st.subheader("🧩 Mapare `grup_sku` în DB (pe nume normalizat)")
     if engine:
-        prod = pd.read_sql("select * from products", engine)
-        prod["name_key"] = prod["name_key"].fillna(prod["name"].map(norm_name_value))
-        sb = pd.read_sql(
-            "select code, product_name, sum(iesiri) as iesiri, max(stoc_final) as stoc_final "
-            "from stock_moves group by code, product_name",
-            engine
-        )
-        sb["name_key"] = sb["product_name"].map(norm_name_value)
-        top = sb.sort_values(["name_key","iesiri"], ascending=[True, False]).groupby("name_key").first().reset_index()
-        map_df = top[["name_key","code"]].rename(columns={"code":"sb_code"})
-        prod = prod.merge(map_df, on="name_key", how="left")
-        prod["grup_sku"] = prod["grup_sku"].fillna(prod["sb_code"]).fillna(prod["code"])
-        with engine.begin() as conn:
-            for _, r in prod.iterrows():
-                conn.execute(text(
-                    "update products set name_key=:nk, grup_sku=:g, updated_at=now() where code=:code"
-                ), {"nk": r["name_key"], "g": r["grup_sku"], "code": r["code"]})
-        st.success("grup_sku setat/actualizat.")
-        st.dataframe(pd.read_sql("select code, name, grup_sku from products order by name limit 200", engine), use_container_width=True)
+        try:
+            prod = pd.read_sql("select * from products", engine)
+        except Exception as e:
+            st.error(f"Nu pot citi products: {e}")
+            prod = pd.DataFrame()
+
+        if not prod.empty:
+            prod["name_key"] = prod["name_key"].fillna(prod["name"].map(norm_name_value))
+            try:
+                sb = pd.read_sql(
+                    "select code, product_name, sum(iesiri) as iesiri, max(stoc_final) as stoc_final "
+                    "from stock_moves group by code, product_name",
+                    engine
+                )
+            except Exception as e:
+                st.error(f"Nu pot citi stock_moves: {e}")
+                sb = pd.DataFrame()
+
+            if not sb.empty:
+                sb["name_key"] = sb["product_name"].map(norm_name_value)
+                # Alegem un SKU SmartBill reprezentativ pe fiecare name_key (cel cu cele mai multe ieșiri)
+                top = sb.sort_values(["name_key","iesiri"], ascending=[True, False]).groupby("name_key").first().reset_index()
+                map_df = top[["name_key","code"]].rename(columns={"code":"sb_code"})
+                prod = prod.merge(map_df, on="name_key", how="left")
+                # Setăm grup_sku = SKU din SmartBill (sau propriul cod dacă nu există mișcări)
+                prod["grup_sku"] = prod["grup_sku"].fillna(prod["sb_code"]).fillna(prod["code"])
+
+                with engine.begin() as conn:
+                    for _, r in prod.iterrows():
+                        conn.execute(text(
+                            "update products set name_key=:nk, grup_sku=:g, updated_at=now() where code=:code"
+                        ), {"nk": r["name_key"], "g": r["grup_sku"], "code": r["code"]})
+
+                st.success("grup_sku setat/actualizat.")
+                st.dataframe(pd.read_sql("select code, name, grup_sku from products order by name", engine), use_container_width=True)
+            else:
+                st.info("Nu există mișcări încă. Încarcă rapoartele SmartBill ca să putem seta grup_sku.")
+
 
 # ---------------- Tab 4: Rapoarte ----------------
 with tabs[4]:
@@ -400,45 +445,48 @@ with tabs[4]:
     if engine:
         coef_recent = st.number_input("Coeficient 30 zile", value=1.5, step=0.1)
         coef_total = st.number_input("Coeficient anual", value=0.2, step=0.1)
-        sql = text(
-            "with moves as ( "
-            "  select code, sum(iesiri) filter (where source_tag = '30z') as v30, "
-            "         sum(iesiri) as vtot, max(stoc_final) as stocf "
-            "  from stock_moves group by code "
-            "), "
-            "master as ( "
-            "  select p.*, coalesce(p.grup_sku, p.code) as gsku from products p "
-            "), "
-            "by_group as ( "
-            "  select mfr.gsku, sum(coalesce(mv.v30,0)) as vanzari_30zile, "
-            "         sum(coalesce(mv.vtot,0)) as vanzari_total, max(coalesce(mv.stocf,0)) as stoc_final "
-            "  from master mfr left join moves mv on mv.code = mfr.code "
-            "  group by mfr.gsku "
-            "), "
-            "cheapest as ( "
-            "  select gsku, code as cheapest_sku, purchase_price_no_vat as cheapest_price from ( "
-            "    select gsku, code, purchase_price_no_vat, "
-            "           row_number() over (partition by gsku order by purchase_price_no_vat asc nulls last) as rn "
-            "    from master "
-            "  ) z where rn = 1 "
-            "), "
-            "skus as ( "
-            "  select gsku, string_agg(code, ', ' order by code) as skus_in_group from master group by gsku "
-            ") "
-            "select g.gsku as grup_sku, "
-            "       max(p.name) filter (where p.code = g.gsku) as product_name, "
-            "       s.skus_in_group, g.stoc_final, g.vanzari_30zile, g.vanzari_total, "
-            "       greatest(0, round(g.vanzari_30zile * :cr + g.vanzari_total * :ct - g.stoc_final)) as recomandat_de_comandat, "
-            "       ch.cheapest_sku, ch.cheapest_price "
-            "from by_group g "
-            "left join cheapest ch on ch.gsku = g.gsku "
-            "left join skus s on s.gsku = g.gsku "
-            "left join products p on p.code = g.gsku "
-            "order by recomandat_de_comandat desc nulls last"
-        )
-        df = pd.read_sql(sql, engine, params={"cr": coef_recent, "ct": coef_total})
-        st.dataframe(df, use_container_width=True)
-        out = BytesIO()
-        with pd.ExcelWriter(out, engine="openpyxl") as w:
-            df.to_excel(w, index=False, sheet_name="recomandari")
-        st.download_button("📥 Descarcă recomandari_din_DB.xlsx", data=out.getvalue(), file_name="recomandari_din_DB.xlsx")
+        try:
+            sql = text(
+                "with moves as ( "
+                "  select code, sum(iesiri) filter (where source_tag = '30z') as v30, "
+                "         sum(iesiri) as vtot, max(stoc_final) as stocf "
+                "  from stock_moves group by code "
+                "), "
+                "master as ( "
+                "  select p.*, coalesce(p.grup_sku, p.code) as gsku from products p "
+                "), "
+                "by_group as ( "
+                "  select mfr.gsku, sum(coalesce(mv.v30,0)) as vanzari_30zile, "
+                "         sum(coalesce(mv.vtot,0)) as vanzari_total, max(coalesce(mv.stocf,0)) as stoc_final "
+                "  from master mfr left join moves mv on mv.code = mfr.code "
+                "  group by mfr.gsku "
+                "), "
+                "cheapest as ( "
+                "  select gsku, code as cheapest_sku, purchase_price_no_vat as cheapest_price from ( "
+                "    select gsku, code, purchase_price_no_vat, "
+                "           row_number() over (partition by gsku order by purchase_price_no_vat asc nulls last) as rn "
+                "    from master "
+                "  ) z where rn = 1 "
+                "), "
+                "skus as ( "
+                "  select gsku, string_agg(code, ', ' order by code) as skus_in_group from master group by gsku "
+                ") "
+                "select g.gsku as grup_sku, "
+                "       max(p.name) filter (where p.code = g.gsku) as product_name, "
+                "       s.skus_in_group, g.stoc_final, g.vanzari_30zile, g.vanzari_total, "
+                "       greatest(0, round(g.vanzari_30zile * :cr + g.vanzari_total * :ct - g.stoc_final)) as recomandat_de_comandat, "
+                "       ch.cheapest_sku, ch.cheapest_price "
+                "from by_group g "
+                "left join cheapest ch on ch.gsku = g.gsku "
+                "left join skus s on s.gsku = g.gsku "
+                "left join products p on p.code = g.gsku "
+                "order by recomandat_de_comandat desc nulls last"
+            )
+            df = pd.read_sql(sql, engine, params={"cr": coef_recent, "ct": coef_total})
+            st.dataframe(df, use_container_width=True)
+            out = BytesIO()
+            with pd.ExcelWriter(out, engine="openpyxl") as w:
+                df.to_excel(w, index=False, sheet_name="recomandari")
+            st.download_button("📥 Descarcă recomandari_din_DB.xlsx", data=out.getvalue(), file_name="recomandari_din_DB.xlsx")
+        except Exception as e:
+            st.error(f"Nu pot genera raportul. Verifică dacă ai importat mișcări și produse. Detalii: {e}")

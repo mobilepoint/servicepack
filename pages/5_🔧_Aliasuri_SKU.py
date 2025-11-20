@@ -4,7 +4,8 @@ from decimal import Decimal, InvalidOperation
 
 import pandas as pd
 import streamlit as st
-from supabase import create_client, Client
+import psycopg2
+from psycopg2.extras import RealDictCursor
 
 # =========================
 #   CONFIG
@@ -13,20 +14,16 @@ st.set_page_config(page_title="Admin aliasuri SKU", layout="wide")
 st.title("🔧 Admin aliasuri SKU")
 
 # =========================
-#   SUPABASE CONNECTION
+#   POSTGRESQL CONNECTION
 # =========================
 @st.cache_resource
-def init_supabase() -> Client:
-    """Inițializează conexiunea Supabase folosind secrets din noua structură"""
+def get_pg_connection_string():
+    """Obține connection string-ul PostgreSQL din secrets"""
     try:
-        url = st.secrets["connections"]["supabase"]["SUPABASE_URL"]
-        key = st.secrets["connections"]["supabase"]["SUPABASE_KEY"]
-        return create_client(url, key)
+        return st.secrets["connections"]["postgresql"]["url"]
     except KeyError:
-        st.error("❌ Credențiale Supabase lipsă din secrets. Verifică configurația.")
+        st.error("❌ Credențiale PostgreSQL lipsă din secrets. Verifică configurația.")
         st.stop()
-
-client = init_supabase()
 
 # =========================
 #   STATE HELPERS
@@ -64,67 +61,141 @@ def canon_sku(x: str) -> str:
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_products(q: str | None):
     """
-    Citește direct din tabelele product și product_sku (bypass view)
-    Construiește manual structura cu primary_sku și alias_skus
+    Citește DIRECT din PostgreSQL (bypass PostgREST complet)
     """
-    with st.spinner("📡 Se încarcă produsele din Supabase..."):
+    with st.spinner("📡 Se încarcă produsele din PostgreSQL..."):
         try:
-            # Obține produsele cu filtrare opțională
+            pg_url = get_pg_connection_string()
+            conn = psycopg2.connect(pg_url, connect_timeout=10)
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            # Query pentru produse cu filtrare opțională
             if q:
-                products_resp = client.table("product").select("id, name").ilike("name", f"%{q}%").order("name").limit(500).execute()
+                query = """
+                    SELECT 
+                        p.id as product_id,
+                        p.name,
+                        (SELECT sku FROM product_sku WHERE product_id = p.id AND is_primary = true LIMIT 1) as primary_sku,
+                        ARRAY(SELECT sku FROM product_sku WHERE product_id = p.id AND is_primary = false ORDER BY sku) as alias_skus
+                    FROM product p
+                    WHERE p.name ILIKE %s
+                    ORDER BY p.name
+                    LIMIT 500
+                """
+                cursor.execute(query, (f"%{q}%",))
             else:
-                products_resp = client.table("product").select("id, name").order("name").limit(500).execute()
+                query = """
+                    SELECT 
+                        p.id as product_id,
+                        p.name,
+                        (SELECT sku FROM product_sku WHERE product_id = p.id AND is_primary = true LIMIT 1) as primary_sku,
+                        ARRAY(SELECT sku FROM product_sku WHERE product_id = p.id AND is_primary = false ORDER BY sku) as alias_skus
+                    FROM product p
+                    ORDER BY p.name
+                    LIMIT 500
+                """
+                cursor.execute(query)
             
-            products = products_resp.data or []
+            # Obține rezultatele
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
             
-            if not products:
+            if not rows:
                 return pd.DataFrame(columns=["product_id", "name", "primary_sku", "alias_skus"])
             
-            # Obține toate product IDs
-            product_ids = [p["id"] for p in products]
-            
-            # Obține toate SKU-urile pentru aceste produse într-un singur query
-            skus_resp = client.table("product_sku").select("sku, product_id, is_primary").in_("product_id", product_ids).execute()
-            skus = skus_resp.data or []
-            
-            # Grupează SKU-urile pe product_id
-            sku_map = {}
-            for sku_row in skus:
-                pid = sku_row["product_id"]
-                if pid not in sku_map:
-                    sku_map[pid] = {"primary": None, "aliases": []}
-                
-                if sku_row.get("is_primary"):
-                    sku_map[pid]["primary"] = sku_row["sku"]
-                else:
-                    sku_map[pid]["aliases"].append(sku_row["sku"])
-            
-            # Construiește DataFrame final
-            rows = []
-            for product in products:
-                pid = product["id"]
-                sku_data = sku_map.get(pid, {"primary": None, "aliases": []})
-                
-                rows.append({
-                    "product_id": pid,
-                    "name": product["name"],
-                    "primary_sku": sku_data["primary"] or "",
-                    "alias_skus": sku_data["aliases"]
+            # Convertește în DataFrame
+            df_data = []
+            for row in rows:
+                df_data.append({
+                    "product_id": row["product_id"],
+                    "name": row["name"],
+                    "primary_sku": row["primary_sku"] or "",
+                    "alias_skus": row["alias_skus"] or []
                 })
             
-            return pd.DataFrame(rows)
+            return pd.DataFrame(df_data)
             
         except Exception as e:
-            st.error(f"❌ Eroare la citirea din Supabase: {str(e)}")
+            st.error(f"❌ Eroare la citirea din PostgreSQL: {str(e)}")
+            import traceback
+            st.code(traceback.format_exc())
             return pd.DataFrame(columns=["product_id", "name", "primary_sku", "alias_skus"])
 
-def rpc_add_alias(product_id: str, new_sku: str):
-    """Apelează funcția RPC pentru adăugare alias"""
-    return client.rpc("add_alias_sku", {"p_product_id": product_id, "p_sku": new_sku}).execute()
+def add_alias(product_id: str, new_sku: str):
+    """Adaugă alias direct prin PostgreSQL"""
+    try:
+        pg_url = get_pg_connection_string()
+        conn = psycopg2.connect(pg_url, connect_timeout=10)
+        cursor = conn.cursor()
+        
+        # Verifică dacă SKU-ul există deja
+        cursor.execute(
+            "SELECT product_id, is_primary FROM product_sku WHERE sku = %s",
+            (new_sku.strip(),)
+        )
+        existing = cursor.fetchone()
+        
+        if existing:
+            cursor.close()
+            conn.close()
+            return {"success": False, "error": f"SKU {new_sku} există deja pentru un alt produs"}
+        
+        # Inserează SKU-ul ca alias
+        cursor.execute(
+            "INSERT INTO product_sku (sku, product_id, is_primary) VALUES (%s, %s, false)",
+            (new_sku.strip(), product_id)
+        )
+        
+        conn.commit()
+        affected = cursor.rowcount
+        cursor.close()
+        conn.close()
+        
+        return {"success": affected > 0, "error": None if affected > 0 else "Insert failed"}
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
-def rpc_remove_alias(product_id: str, sku: str):
-    """Apelează funcția RPC pentru ștergere alias"""
-    return client.rpc("remove_alias_sku", {"p_product_id": product_id, "p_sku": sku}).execute()
+def remove_alias(product_id: str, sku: str):
+    """Șterge alias direct prin PostgreSQL"""
+    try:
+        pg_url = get_pg_connection_string()
+        conn = psycopg2.connect(pg_url, connect_timeout=10)
+        cursor = conn.cursor()
+        
+        # Verifică dacă este SKU principal
+        cursor.execute(
+            "SELECT is_primary FROM product_sku WHERE sku = %s AND product_id = %s",
+            (sku.strip(), product_id)
+        )
+        result = cursor.fetchone()
+        
+        if not result:
+            cursor.close()
+            conn.close()
+            return {"success": False, "error": "SKU nu există pentru acest produs"}
+        
+        if result[0]:  # is_primary = true
+            cursor.close()
+            conn.close()
+            return {"success": False, "error": "Nu se poate șterge SKU-ul principal"}
+        
+        # Șterge SKU-ul
+        cursor.execute(
+            "DELETE FROM product_sku WHERE sku = %s AND product_id = %s AND is_primary = false",
+            (sku.strip(), product_id)
+        )
+        
+        conn.commit()
+        affected = cursor.rowcount
+        cursor.close()
+        conn.close()
+        
+        return {"success": affected > 0, "error": None if affected > 0 else "Delete failed"}
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 # =========================
 #   UI - SEARCH
@@ -288,16 +359,12 @@ with right:
                 
                 for idx, sku in enumerate(to_add):
                     status_text.text(f"Procesez: {sku}...")
-                    try:
-                        resp = rpc_add_alias(product_id, sku)
-                        if getattr(resp, "error", None):
-                            fail.append((sku, str(resp.error)))
-                        elif not getattr(resp, "data", None):
-                            fail.append((sku, "RPC a răspuns fără date"))
-                        else:
-                            ok.append(sku)
-                    except Exception as e:
-                        fail.append((sku, repr(e)))
+                    result = add_alias(product_id, sku)
+                    
+                    if result["success"]:
+                        ok.append(sku)
+                    else:
+                        fail.append((sku, result["error"]))
                     
                     progress_bar.progress((idx + 1) / len(to_add))
                 
@@ -359,16 +426,12 @@ with right:
                 
                 for idx, sku in enumerate(sel_to_remove):
                     status_text.text(f"Șterg: {sku}...")
-                    try:
-                        resp = rpc_remove_alias(product_id, sku)
-                        if getattr(resp, "error", None):
-                            fail.append((sku, str(resp.error)))
-                        elif not getattr(resp, "data", None):
-                            fail.append((sku, "Nu s-a șters niciun rând (poate nu exista)"))
-                        else:
-                            ok.append(sku)
-                    except Exception as e:
-                        fail.append((sku, repr(e)))
+                    result = remove_alias(product_id, sku)
+                    
+                    if result["success"]:
+                        ok.append(sku)
+                    else:
+                        fail.append((sku, result["error"]))
                     
                     progress_bar.progress((idx + 1) / len(sel_to_remove))
                 
@@ -392,4 +455,4 @@ with right:
 # =========================
 st.divider()
 st.caption("💡 **Sfat:** Aliasurile SKU te ajută să identifici produse la furnizori chiar dacă sunt listate sub coduri diferite.")
-#forteaza redeploy
+st.caption("🔌 **Conexiune:** PostgreSQL direct (bypass Supabase PostgREST)")

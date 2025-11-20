@@ -392,3 +392,4 @@ with right:
 # =========================
 st.divider()
 st.caption("💡 **Sfat:** Aliasurile SKU te ajută să identifici produse la furnizori chiar dacă sunt listate sub coduri diferite.")
+#forteaza redeploy

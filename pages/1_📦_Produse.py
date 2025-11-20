@@ -1,4 +1,3 @@
-# pages/1_📦_Produse.py
 import uuid
 import json
 from datetime import datetime
@@ -11,9 +10,6 @@ import requests
 from requests.auth import HTTPBasicAuth
 import time
 
-# =========================
-#   CONFIG
-# =========================
 st.set_page_config(page_title="Produse WooCommerce & SmartBill", layout="wide")
 st.title("📦 Import Produse")
 
@@ -22,34 +18,26 @@ st.title("📦 Import Produse")
 # =========================
 @st.cache_resource
 def get_pg_connection_string():
-    try:
-        return st.secrets["connections"]["postgresql"]["url"]
-    except KeyError:
-        st.error("❌ Credențiale PostgreSQL lipsă")
-        st.stop()
+    return st.secrets["connections"]["postgresql"]["url"]
 
 @st.cache_resource
 def init_woocommerce():
-    try:
-        return API(
-            url=st.secrets["connections"]["woocommerce"]["WOO_URL"],
-            consumer_key=st.secrets["connections"]["woocommerce"]["WOO_CONSUMER_KEY"],
-            consumer_secret=st.secrets["connections"]["woocommerce"]["WOO_CONSUMER_SECRET"],
-            version="wc/v3",
-            timeout=60
-        )
-    except KeyError:
-        st.error("❌ Credențiale WooCommerce lipsă")
-        st.stop()
+    return API(
+        url=st.secrets["connections"]["woocommerce"]["WOO_URL"],
+        consumer_key=st.secrets["connections"]["woocommerce"]["WOO_CONSUMER_KEY"],
+        consumer_secret=st.secrets["connections"]["woocommerce"]["WOO_CONSUMER_SECRET"],
+        version="wc/v3",
+        timeout=60
+    )
 
 @st.cache_resource
 def init_smartbill():
     try:
+        sbcfg = st.secrets["connections"]["smartbill"]
         return {
-            'email': st.secrets["connections"]["smartbill"]["EMAIL"],
-            'token': st.secrets["connections"]["smartbill"]["TOKEN"],
-            'cif': st.secrets["connections"]["smartbill"]["CIF"],
-            'base_url': 'https://ws.smartbill.ro/SBORO/api'
+            'email': sbcfg["EMAIL"],
+            'token': sbcfg["TOKEN"],
+            'cif': sbcfg["CIF"]
         }
     except KeyError:
         st.error("❌ Credențiale SmartBill lipsă")
@@ -58,7 +46,7 @@ def init_smartbill():
 wcapi = init_woocommerce()
 
 # =========================
-#   SESSION STATE
+#   SESSION & HELPERS
 # =========================
 if "import_session_id" not in st.session_state:
     st.session_state["import_session_id"] = None
@@ -67,9 +55,6 @@ if "import_phase" not in st.session_state:
 if "import_stats" not in st.session_state:
     st.session_state["import_stats"] = {}
 
-# =========================
-#   HELPER FUNCTIONS
-# =========================
 def get_db_connection():
     return psycopg2.connect(get_pg_connection_string())
 
@@ -83,26 +68,6 @@ def safe_decimal(value, default=0):
         return Decimal(cleaned)
     except (ValueError, TypeError, InvalidOperation):
         return Decimal(default)
-
-def safe_int(value, default=0):
-    if value is None or value == '' or value == 'null':
-        return default
-    try:
-        return int(float(str(value)))
-    except (ValueError, TypeError):
-        return default
-
-def compose_variation_name(parent_name: str, attributes: list) -> str:
-    if not attributes:
-        return parent_name
-    attr_parts = []
-    for attr in attributes:
-        value = attr.get('option', '')
-        if value:
-            attr_parts.append(value)
-    if attr_parts:
-        return f"{parent_name} - {' - '.join(attr_parts)}"
-    return parent_name
 
 def clear_staging_tables(session_id: str = None):
     try:
@@ -135,11 +100,179 @@ def get_latest_session_id():
         return None
 
 # =========================
-#   WOOCOMMERCE - QUICK REFRESH
+#   SMARTBILL INTEGRATION
+# =========================
+def get_smartbill_stocks(email, token, cif):
+    try:
+        r = requests.get(
+            "https://ws.smartbill.ro/SBORO/api/stocks",
+            auth=HTTPBasicAuth(email, token),
+            headers={"Accept": "application/json"},
+            params={"cif": cif, "date": datetime.now().strftime("%Y-%m-%d")},
+            timeout=30
+        )
+        if r.status_code == 200:
+            return r.json()
+        else:
+            st.error(f"SmartBill API error: {r.status_code} - {r.text}")
+            return None
+    except Exception as e:
+        st.error(f"Error fetching SmartBill stocks: {e}")
+        return None
+
+def process_smartbill_data(data):
+    sb_dict = {}
+    if not data:
+        return sb_dict
+    products = []
+    if isinstance(data, dict) and "list" in data:
+        for w in data["list"]:
+            if isinstance(w, dict) and "products" in w:
+                products.extend(w["products"])
+    for p in products:
+        if not isinstance(p, dict):
+            continue
+        code = p.get('productCode', '').strip() or p.get("code", "").strip()
+        if not code:
+            continue
+        sb_dict[code] = {
+            'name': p.get('productName', '') or p.get("name", ""),
+            'stock': float(p.get('quantity', 0)),
+            'unitPrice': float(p.get('unitPrice', 0)) if p.get('unitPrice') else 0
+        }
+    return sb_dict
+
+def get_smartbill_decisions():
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT smartbill_sku, decision_type, product_id FROM smartbill_sku_mapping_decisions")
+        memory = {row[0]: {"decision": row[1], "product_id": row[2]} for row in cursor.fetchall()}
+        cursor.close()
+        conn.close()
+        return memory
+    except Exception as e:
+        st.error(f"Eroare la citire decizii: {e}")
+        return {}
+
+def save_smartbill_decision(sku, action, name=None):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        if action == "creaza_nou":
+            new_product_id = str(uuid.uuid4())
+            cursor.execute("INSERT INTO product (id, name) VALUES (%s, %s)", (new_product_id, name or sku))
+            cursor.execute("INSERT INTO product_sku (sku, product_id, is_primary) VALUES (%s, %s, true)", (sku, new_product_id))
+            cursor.execute("""
+                INSERT INTO smartbill_sku_mapping_decisions (smartbill_sku, product_id, decision_type, decided_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (smartbill_sku) DO UPDATE SET product_id = %s, decision_type = %s, decided_at = NOW()
+            """, (sku, new_product_id, action, new_product_id, action))
+        else:
+            cursor.execute("""
+                INSERT INTO smartbill_sku_mapping_decisions (smartbill_sku, decision_type, decided_at)
+                VALUES (%s, %s, NOW())
+                ON CONFLICT (smartbill_sku) DO UPDATE SET decision_type = %s, decided_at = NOW()
+            """, (sku, action, action))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        st.error(f"Eroare la salvarea deciziei pentru {sku}: {e}")
+        return False
+
+def sync_smartbill_data():
+    config = init_smartbill()
+    st.markdown("### 📊 Sync SmartBill")
+    st.info("📥 Fetch stoc din SmartBill...")
+    data = get_smartbill_stocks(config['email'], config['token'], config['cif'])
+    if not data:
+        st.error("❌ Nu am primit date de la SmartBill")
+        return
+    sb_products = process_smartbill_data(data)
+    st.success(f"{len(sb_products)} produse citite din SmartBill")
+    # Încarcă decizii memorate
+    decisions = get_smartbill_decisions()
+    # Citește SKU-uri cunoscute
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT sku, product_id FROM product_sku")
+        sku_to_product = {row[0]: row[1] for row in cursor.fetchall()}
+        cursor.close()
+        conn.close()
+    except Exception as e:
+        st.error(f"Eroare citire sku-uri locale: {e}")
+        sku_to_product = {}
+    stock_data = []
+    unmatched = []
+    matched_count = 0
+    for sku, info in sb_products.items():
+        dec = decisions.get(sku, {}).get("decision")
+        if sku in sku_to_product:
+            product_id = sku_to_product[sku]
+            matched_count += 1
+            stock_data.append((product_id, sku, Decimal(info['stock'])))
+        elif dec == "ignora":
+            continue
+        elif dec == "creaza_nou" and decisions[sku].get("product_id"):
+            product_id = decisions[sku]["product_id"]
+            matched_count += 1
+            stock_data.append((product_id, sku, Decimal(info['stock'])))
+        else:
+            unmatched.append({'sku': sku, 'name': info['name'], 'stock': info['stock']})
+
+    # UI persistent pentru unmatched
+    if unmatched:
+        st.warning(f"⚠️ {len(unmatched)} SKU-uri necunoscute care necesită atenția ta")
+        with st.expander("SKU-uri necunoscute"):
+            for item in unmatched[:20]:
+                cod = item['sku']
+                cols = st.columns([2,3,2,3])
+                cols[0].write(cod)
+                cols[1].write(item['name'])
+                cols[2].write(f"Stoc: {item['stock']}")
+                options = {"Așteaptă": "asteapta", "Creează nou": "creaza_nou", "Ignoră": "ignora"}
+                act = cols[3].selectbox("", list(options.keys()), key=f"sb_{cod}")
+                if cols[3].button("Salvează", key=f"sb_save_{cod}"):
+                    ok = save_smartbill_decision(cod, options[act], name=item['name'])
+                    if ok:
+                        st.experimental_rerun()
+        st.info("💡 Odată acțiunea salvată, lista se va actualiza. Când nu mai apar, dă Sync din nou.")
+        return
+    if stock_data:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM smartbill_stoc")
+            execute_batch(cursor, """
+                INSERT INTO smartbill_stoc (product_id, sku, stock_quantity)
+                VALUES (%s, %s, %s)
+            """, stock_data, page_size=500)
+            conn.commit()
+            cursor.close()
+            conn.close()
+            st.success(f"✅ Salvate {len(stock_data)} produse cu match in SmartBill stock")
+            st.metric("✅ Match-uri", matched_count)
+        except Exception as e:
+            st.error(f"Eroare salvare SmartBill: {e}")
+
+# =========================
+#   UI PRINCIPALA SMARTBILL
+# =========================
+st.markdown("### 📊 Import din SmartBill")
+if st.button("📊 Sync SmartBill", use_container_width=True, type="primary"):
+    sync_smartbill_data()
+st.caption("**Sync SmartBill:** Stoc + decizii persistente. Selectează acțiuni doar pe ce nu are match.")
+st.divider()
+
+# =========================
+#   QUICK REFRESH
 # =========================
 def quick_refresh_prices_and_stock():
     with st.container():
-        st.markdown("### ⚡ Quick Refresh WooCommerce")
+        st.markdown("### ⚡ Quick Refresh")
         
         try:
             conn = get_db_connection()
@@ -167,6 +300,7 @@ def quick_refresh_prices_and_stock():
         try:
             start_time = time.time()
             response = wcapi.get("products/export-full")
+            
             if response.status_code != 200:
                 st.error(f"Eroare API: {response.status_code}")
                 return
@@ -299,7 +433,7 @@ def quick_refresh_prices_and_stock():
             st.warning("Nu am găsit date")
 
 # =========================
-#   WOOCOMMERCE - PHASE 1: EXTRACT
+#   PHASE 1: EXTRACT
 # =========================
 def fetch_and_stage_products_bulk(session_id: str):
     stats = {
@@ -408,36 +542,55 @@ def fetch_and_stage_products_bulk(session_id: str):
     return stats
 
 # =========================
-#   WOOCOMMERCE - PHASE 2: TRANSFORM
+#   PHASE 2: TRANSFORM + AUTO-CREATE
 # =========================
 def run_sku_matching_and_autocreate(session_id: str):
+    """FAZA 2: Matching + Auto-create"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
         st.info("🔍 Matching SKU...")
         
+        # DEBUG: Verifică câte SKU-uri avem în staging
         cursor.execute("SELECT COUNT(*) FROM woo_staging_raw WHERE import_session_id = %s AND sku IS NOT NULL", (session_id,))
         sku_count = cursor.fetchone()[0]
         st.write(f"🔎 DEBUG: {sku_count} SKU-uri în staging_raw")
         
+        # Rulează matching
         cursor.execute("SELECT * FROM match_skus_for_session(%s)", (session_id,))
         matches = cursor.fetchall()
         
         st.write(f"🔎 DEBUG: Funcția SQL a returnat {len(matches)} match-uri")
         
         if not matches:
-            st.warning("⚠️ Nu am găsit match-uri!")
+            st.warning("⚠️ Nu am găsit match-uri din funcția SQL!")
+            
+            # DEBUG: Vezi de ce nu returnează
+            cursor.execute("""
+                SELECT sr.sku, 
+                       (SELECT COUNT(*) FROM product_sku ps WHERE ps.sku = sr.sku) as count_in_product_sku
+                FROM woo_staging_raw sr
+                WHERE sr.import_session_id = %s AND sr.sku IS NOT NULL
+                LIMIT 10
+            """, (session_id,))
+            debug_skus = cursor.fetchall()
+            st.write("🔎 DEBUG: Sample SKU-uri:", debug_skus)
+            
             cursor.close()
             conn.close()
             return {}
         
+        # Procesează match-urile
         match_data = []
         created_products = 0
         
         for match in matches:
             staging_raw_id, sku, product_id, match_type, requires_action = match
             
+            st.write(f"🔎 DEBUG Match: SKU={sku}, type={match_type}, product_id={product_id}, requires_action={requires_action}")
+            
+            # UNKNOWN = Creează automat
             if match_type == 'unknown' and sku:
                 cursor.execute("SELECT parent_name FROM woo_staging_raw WHERE id = %s", (staging_raw_id,))
                 result = cursor.fetchone()
@@ -451,12 +604,17 @@ def run_sku_matching_and_autocreate(session_id: str):
                 match_type = 'auto_created'
                 requires_action = False
                 created_products += 1
+                
+                st.write(f"🆕 Creat produs: {product_name} (SKU: {sku})")
             
             match_data.append((
                 session_id, staging_raw_id, sku, product_id, match_type, requires_action
             ))
         
+        # Insert match-uri
         if match_data:
+            st.write(f"💾 Inserez {len(match_data)} match-uri în woo_staging_matched...")
+            
             execute_batch(cursor, """
                 INSERT INTO woo_staging_matched 
                 (import_session_id, staging_raw_id, sku, product_id, match_type, requires_action)
@@ -467,8 +625,10 @@ def run_sku_matching_and_autocreate(session_id: str):
             """, match_data, page_size=1000)
             
             conn.commit()
+            
             st.success(f"✅ Inserate {len(match_data)} match-uri | 🆕 Creeat {created_products} produse")
         
+        # Statistici
         cursor.execute("SELECT * FROM v_import_status WHERE import_session_id = %s", (session_id,))
         stats = cursor.fetchone()
         
@@ -476,6 +636,7 @@ def run_sku_matching_and_autocreate(session_id: str):
         conn.close()
         
         if stats:
+            st.write(f"📊 Stats din v_import_status: {stats}")
             return {
                 'total': stats[1],
                 'matched_primary': stats[2],
@@ -496,7 +657,7 @@ def run_sku_matching_and_autocreate(session_id: str):
         return {}
 
 # =========================
-#   WOOCOMMERCE - PHASE 3: RECONCILIATION
+#   PHASE 3: RECONCILIATION
 # =========================
 def get_pending_aliases(session_id: str, limit: int = 50):
     try:
@@ -547,7 +708,7 @@ def mark_alias_action(match_id: str, action: str):
         return False
 
 # =========================
-#   WOOCOMMERCE - PHASE 4: FINALIZE
+#   PHASE 4: FINALIZE
 # =========================
 def finalize_import(session_id: str):
     try:
@@ -579,149 +740,10 @@ def finalize_import(session_id: str):
         return {}
 
 # =========================
-#   SMARTBILL API - FUNCȚII
+#   MAIN UI
 # =========================
-def get_smartbill_stocks(email, token, cif, warehouse_name):
-    try:
-        r = requests.get(
-            "https://ws.smartbill.ro/SBORO/api/stocks",
-            auth=HTTPBasicAuth(email, token),
-            headers={"Accept": "application/json"},
-            params={"cif": cif, "date": datetime.now().strftime("%Y-%m-%d"), "warehouseName": warehouse_name},
-            timeout=30
-        )
-        if r.status_code == 200:
-            return r.json()
-        else:
-            st.error(f"SmartBill API error: {r.status_code} - {r.text}")
-            return None
-    except Exception as e:
-        st.error(f"Error fetching SmartBill stocks: {e}")
-        return None
+st.markdown("### 🔄 Import din WooCommerce")
 
-def process_smartbill_data(data):
-    sb_dict = {}
-    if not data:
-        return sb_dict
-    
-    products = []
-    if isinstance(data, dict) and "list" in data:
-        for w in data["list"]:
-            if isinstance(w, dict) and "products" in w:
-                products.extend(w["products"])
-    
-    for p in products:
-        if not isinstance(p, dict):
-            continue
-        code = p.get('productCode', '').strip()
-        if not code:
-            continue
-        sb_dict[code] = {
-            'name': p.get('productName', ''),
-            'stock': float(p.get('quantity', 0)),
-            'unitPrice': float(p.get('unitPrice', 0)) if p.get('unitPrice') else 0
-        }
-    
-    return sb_dict
-
-def sync_smartbill_data():
-    config = init_smartbill()
-    warehouse = "Eroilor 19 cv"
-    
-    st.markdown("### 📊 Sync SmartBill")
-    
-    st.info("📥 Fetch stoc din SmartBill...")
-    data = get_smartbill_stocks(config['email'], config['token'], config['cif'], warehouse)
-    
-    if not data:
-        st.error("❌ Nu am primit date de la SmartBill")
-        return
-    
-    st.success(f"✅ {len(data.get('list', []))} gestiuni primite")
-    
-    sb_products = process_smartbill_data(data)
-    st.info(f"Detected {len(sb_products)} products in SmartBill stock")
-    
-    try:
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        
-        # Load known SKU-uri și decizii
-        cursor.execute("SELECT sku, product_id FROM product_sku")
-        sku_to_product = {row[0]: row[1] for row in cursor.fetchall()}
-        
-        cursor.execute("SELECT smartbill_sku, product_id, decision_type FROM smartbill_sku_mapping_decisions")
-        decisions = {row[0]: row[1:] for row in cursor.fetchall()}
-        
-        stock_data = []
-        unmatched = []
-        matched_count = 0
-        
-        for sku, info in sb_products.items():
-            if sku in sku_to_product:
-                product_id = sku_to_product[sku]
-                matched_count += 1
-            elif sku in decisions and decisions[sku][1] != 'ignore':
-                product_id = decisions[sku][0]
-                matched_count += 1
-            else:
-                unmatched.append({'sku': sku, 'name': info['name'], 'stock': info['stock']})
-                continue
-            
-            stock_data.append(
-                (product_id, sku, warehouse, Decimal(info['stock']))
-            )
-        
-        if unmatched:
-            st.warning(f"⚠️ {len(unmatched)} SKU-uri necunoscute care necesită atenția ta")
-            with st.expander("SKU-uri necunoscute"):
-                for item in unmatched[:10]:
-                    cols = st.columns([2,3,2,3])
-                    cols[0].write(item['sku'])
-                    cols[1].write(item['name'])
-                    cols[2].write(f"Stoc: {item['stock']}")
-                    action = cols[3].selectbox("Alege acțiune", ["Așteaptă", "Creează nou", "Ignoră"], key=f"sb_{item['sku']}")
-                    if cols[3].button("Salvează", key=f"sb_save_{item['sku']}"):
-                        if action == "Creează nou":
-                            try:
-                                new_product_id = str(uuid.uuid4())
-                                cursor.execute("INSERT INTO product (id, name) VALUES (%s, %s)", (new_product_id, item['name']))
-                                cursor.execute("INSERT INTO product_sku (sku, product_id, is_primary) VALUES (%s, %s, true)", (item['sku'], new_product_id))
-                                cursor.execute("INSERT INTO smartbill_sku_mapping_decisions (smartbill_sku, product_id, decision_type) VALUES (%s, %s, 'create_new')", (item['sku'], new_product_id))
-                                conn.commit()
-                                st.success(f"Produs creat: {item['name']}")
-                                st.experimental_rerun()
-                            except Exception as e:
-                                st.error(f"Eroare la creare: {e}")
-                        elif action == "Ignoră":
-                            try:
-                                cursor.execute("INSERT INTO smartbill_sku_mapping_decisions (smartbill_sku, decision_type) VALUES (%s, 'ignore')", (item['sku'],))
-                                conn.commit()
-                                st.success(f"SKU {item['sku']} ignorat")
-                                st.experimental_rerun()
-                            except Exception as e:
-                                st.error(f"Eroare la ignorare: {e}")
-            return
-        
-        if stock_data:
-            cursor.execute("DELETE FROM smartbill_stoc")
-            execute_batch(cursor, """
-                INSERT INTO smartbill_stoc (product_id, sku, gestiune, stock_quantity)
-                VALUES (%s, %s, %s, %s)
-            """, stock_data, page_size=500)
-            conn.commit()
-            st.success(f"✅ Salvate {len(stock_data)} în SmartBill stock")
-            st.metric("✅ Match-uri", matched_count)
-        
-        cursor.close()
-        conn.close()
-    
-    except Exception as e:
-        st.error(f"Eroare salvare SmartBill: {e}")
-
-# =========================
-#   UI PRINCIPAL
-# =========================
 if st.session_state["import_phase"]:
     phase_labels = {
         'extracting': '📥 FAZA 1: Extragere',
@@ -732,6 +754,7 @@ if st.session_state["import_phase"]:
     }
     st.info(f"**Status:** {phase_labels.get(st.session_state['import_phase'])}")
 
+# BUTOANE
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -741,33 +764,140 @@ with col1:
         st.session_state["import_stats"] = {}
         with st.spinner("🗑️ Curăț..."):
             clear_staging_tables()
-        st.experimental_rerun()
+        st.rerun()
 
 with col2:
+    # BUTON NOU - Rulează doar matching pe datele existente
     if st.button("🔄 Rulează Matching", use_container_width=True):
         latest_session = get_latest_session_id()
         if latest_session:
             st.session_state["import_session_id"] = latest_session
             st.session_state["import_phase"] = 'matching'
             st.session_state["import_stats"] = {}
-            st.experimental_rerun()
+            st.rerun()
         else:
-            st.error("Nu există date în staging!")
+            st.error("Nu există date în staging! Rulează Full Import mai întâi.")
 
 with col3:
     if st.button("⚡ Quick Refresh", use_container_width=True):
         quick_refresh_prices_and_stock()
 
-st.caption("**Full Import:** Tot | **Matching:** Doar matching | **Quick Refresh:** Stoc + prețuri")
+st.caption("**Full Import:** Tot procesul | **Matching:** Doar matching pe datele existente | **Quick Refresh:** Stoc + prețuri")
 
 st.divider()
 
-st.markdown("### 📊 Import din SmartBill")
+# =========================
+#   WORKFLOW
+# =========================
 
-if st.button("📊 Sync SmartBill", use_container_width=True, type="primary"):
-    sync_smartbill_data()
+if st.session_state["import_session_id"] and st.session_state["import_phase"] == 'extracting':
+    st.markdown("### 📥 FAZA 1")
+    
+    with st.spinner("Extrag..."):
+        stats = fetch_and_stage_products_bulk(st.session_state["import_session_id"])
+        st.session_state["import_stats"]['extract'] = stats
+        st.session_state["import_phase"] = 'matching'
+    
+    st.success(f"✅ {stats.get('variations_inserted', 0) + stats.get('simple_products', 0)} produse")
+    st.rerun()
 
-st.caption("**Sync SmartBill:** Stoc + Intrări (FIFO) din gestiunea 'Eroilor 19 cv'")
+if st.session_state["import_session_id"] and st.session_state["import_phase"] == 'matching':
+    st.markdown("### 🔍 FAZA 2: Matching + Auto-create")
+    
+    with st.spinner("Matching..."):
+        match_stats = run_sku_matching_and_autocreate(st.session_state["import_session_id"])
+        st.session_state["import_stats"]['matching'] = match_stats
+        
+        if match_stats:
+            st.session_state["import_phase"] = 'reconciling'
+        else:
+            st.error("❌ Matching a eșuat! Vezi debug info mai sus.")
+    
+    if st.session_state["import_phase"] == 'reconciling':
+        st.success(f"✅ Matching OK")
+        st.rerun()
+
+if st.session_state["import_session_id"] and st.session_state["import_phase"] == 'reconciling':
+    st.markdown("### 🤔 FAZA 3")
+    
+    match_stats = st.session_state["import_stats"].get('matching', {})
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("✅ Match automat", match_stats.get('matched_primary', 0))
+    with col2:
+        st.metric("🆕 Creeat automat", match_stats.get('auto_created', 0))
+    with col3:
+        st.metric("🔗 Aliasuri", match_stats.get('matched_alias', 0))
+    with col4:
+        st.metric("⚠️ Duplicate", match_stats.get('duplicates', 0))
+    
+    pending = match_stats.get('pending_actions', 0)
+    
+    if pending == 0:
+        st.success("🎉 Nu sunt acțiuni pendinte!")
+        
+        if st.button("📦 Finalizează", type="primary"):
+            st.session_state["import_phase"] = 'finalizing'
+            st.rerun()
+    else:
+        st.warning(f"⚠️ {pending} aliasuri necesită confirmare")
+        
+        alias_items = get_pending_aliases(st.session_state["import_session_id"])
+        
+        if alias_items:
+            st.markdown("#### 🔗 Confirmă aliasuri")
+            
+            for item in alias_items:
+                with st.expander(f"{item['sku']} → {item['parent_name']}"):
+                    st.write(f"**Produs existent:** {item['existing_product_name']}")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        if st.button(f"✅ Confirmă", key=f"c_{item['match_id']}"):
+                            mark_alias_action(item['match_id'], 'confirmed')
+                            st.rerun()
+                    with col2:
+                        if st.button(f"❌ Skip", key=f"s_{item['match_id']}"):
+                            mark_alias_action(item['match_id'], 'skipped')
+                            st.rerun()
+
+if st.session_state["import_session_id"] and st.session_state["import_phase"] == 'finalizing':
+    st.markdown("### 📦 FAZA 4")
+    
+    with st.spinner("Transfer..."):
+        final_stats = finalize_import(st.session_state["import_session_id"])
+        st.session_state["import_stats"]['finalize'] = final_stats
+        st.session_state["import_phase"] = 'done'
+    
+    st.success("✅ OK!")
+    st.rerun()
+
+if st.session_state["import_session_id"] and st.session_state["import_phase"] == 'done':
+    st.markdown("### ✅ Complet!")
+    st.balloons()
+    
+    extract_stats = st.session_state["import_stats"].get('extract', {})
+    match_stats = st.session_state["import_stats"].get('matching', {})
+    final_stats = st.session_state["import_stats"].get('finalize', {})
+    
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("⏱️", f"{extract_stats.get('duration', 0):.1f}s")
+    with col2:
+        st.metric("💰 Prețuri", final_stats.get('prices_inserted', 0))
+    with col3:
+        st.metric("📦 Stocuri", final_stats.get('stock_inserted', 0))
+    with col4:
+        st.metric("🆕 Creeat", match_stats.get('auto_created', 0))
+    
+    if st.button("🧹 Reset", use_container_width=True):
+        clear_staging_tables(st.session_state["import_session_id"])
+        st.session_state["import_session_id"] = None
+        st.session_state["import_phase"] = None
+        st.session_state["import_stats"] = {}
+        st.rerun()
 
 st.divider()
-st.caption("💡 Primary=automat | Secondary=confirmă | Necunoscut=creează automat | SmartBill integrat")
+st.caption("💡 Primary=automat | Secondary=confirmă | Necunoscut=creează automat")
+

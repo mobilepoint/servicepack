@@ -98,11 +98,21 @@ def check_all_connections():
         sb_token = st.secrets["connections"]["smartbill"]["TOKEN"]
         sb_cif = st.secrets["connections"]["smartbill"]["CIF"]
         
-        # Test endpoint SmartBill
-        url = "https://ws.smartbill.ro/SBORO/api/misc/test"
+        # Endpoint corect pentru SmartBill - verificare liste (taxe)
+        url = "https://ws.smartbill.ro/SBORO/api/tax"
         auth = HTTPBasicAuth(sb_email, sb_token)
+        headers = {
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
         
-        response = requests.get(url, auth=auth, timeout=10)
+        response = requests.get(
+            url, 
+            auth=auth, 
+            headers=headers,
+            params={"cif": sb_cif},
+            timeout=10
+        )
         
         if response.status_code == 200:
             results["smartbill"]["status"] = True
@@ -111,8 +121,12 @@ def check_all_connections():
         elif response.status_code == 401:
             results["smartbill"]["message"] = "Autentificare eșuată"
             results["smartbill"]["details"] = "Verifică email/token"
+        elif response.status_code == 403:
+            results["smartbill"]["message"] = "Acces interzis"
+            results["smartbill"]["details"] = "Verifică abonamentul (Platinum)"
         else:
             results["smartbill"]["message"] = f"Cod HTTP {response.status_code}"
+            results["smartbill"]["details"] = response.text[:80] if response.text else ""
             
     except KeyError:
         results["smartbill"]["message"] = "Credențiale lipsă"
@@ -179,7 +193,7 @@ with st.sidebar:
         st.markdown("""
         - [WooCommerce Admin](https://servicepack.ro/wp-admin)
         - [SmartBill Dashboard](https://www.smartbill.ro)
-        - [PostgreSQL Info](https://www.postgresql.org)
+        - [SmartBill API Docs](https://api.smartbill.ro)
         """)
 
 # ===== PAGINA PRINCIPALĂ =====

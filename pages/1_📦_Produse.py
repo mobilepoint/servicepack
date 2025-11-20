@@ -52,9 +52,13 @@ wcapi = init_woocommerce()
 if "import_session_id" not in st.session_state:
     st.session_state["import_session_id"] = None
 if "import_phase" not in st.session_state:
-    st.session_state["import_phase"] = None  # 'extracting', 'matching', 'reconciling', 'finalizing', 'done'
+    st.session_state["import_phase"] = None
 if "import_stats" not in st.session_state:
     st.session_state["import_stats"] = {}
+if "last_processed_page" not in st.session_state:
+    st.session_state["last_processed_page"] = 0
+if "quick_sync_running" not in st.session_state:
+    st.session_state["quick_sync_running"] = False
 
 # =========================
 #   HELPER FUNCTIONS
@@ -80,7 +84,7 @@ def compose_variation_name(parent_name: str, attributes: list) -> str:
         return parent_name
 
 def clear_staging_tables(session_id: str = None):
-    """Șterge datele din staging (opțional doar pentru o sesiune)"""
+    """Șterge datele din staging"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -101,7 +105,7 @@ def clear_staging_tables(session_id: str = None):
         return False
 
 def clear_production_tables():
-    """Șterge datele din tabele production (REPLACE ALL strategy)"""
+    """Șterge datele din tabele production"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -118,14 +122,260 @@ def clear_production_tables():
         st.error(f"Eroare ștergere date production: {e}")
         return False
 
+def get_staging_progress(session_id: str):
+    """Verifică progresul import în staging"""
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT 
+                COUNT(DISTINCT woo_product_id) as products_staged,
+                COUNT(*) as total_rows
+            FROM woo_staging_raw
+            WHERE import_session_id = %s
+        """, (session_id,))
+        
+        result = cursor.fetchone()
+        cursor.close()
+        conn.close()
+        
+        return {'products_staged': result[0] if result else 0, 'total_rows': result[1] if result else 0}
+    except Exception as e:
+        return {'products_staged': 0, 'total_rows': 0}
+
+# =========================
+#   QUICK SYNC FUNCTION
+# =========================
+def quick_sync_prices_and_stock():
+    """Sincronizare rapidă DOAR pentru produse cunoscute"""
+    st.session_state["quick_sync_running"] = True
+    
+    sync_container = st.container()
+    
+    with sync_container:
+        st.markdown("### ⚡ Quick Sync - Stoc și Prețuri")
+        
+        # Step 1: Citește SKU-uri cunoscute
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            
+            st.info("📋 Citesc SKU-urile din baza de date...")
+            cursor.execute("""
+                SELECT ps.sku, ps.product_id, p.name as product_name
+                FROM product_sku ps
+                JOIN product p ON p.id = ps.product_id
+                ORDER BY ps.sku
+            """)
+            
+            known_skus = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            
+            if not known_skus:
+                st.warning("Nu am găsit SKU-uri în baza de date!")
+                st.session_state["quick_sync_running"] = False
+                return
+            
+            st.success(f"✅ Am găsit {len(known_skus)} SKU-uri")
+            
+            sku_to_product = {row['sku']: row['product_id'] for row in known_skus}
+            
+        except Exception as e:
+            st.error(f"Eroare citire SKU-uri: {e}")
+            st.session_state["quick_sync_running"] = False
+            return
+        
+        # Step 2: Fetch din WooCommerce
+        st.info("🔍 Fetch produse din WooCommerce...")
+        
+        woo_products = []
+        
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        page = 1
+        per_page = 100
+        
+        while True:
+            status_text.info(f"📥 Fetch pagina {page} din WooCommerce...")
+            
+            try:
+                response = wcapi.get("products", params={"per_page": per_page, "page": page})
+                
+                if response.status_code != 200:
+                    break
+                
+                products = response.json()
+                
+                if not products:
+                    break
+                
+                woo_products.extend(products)
+                page += 1
+                
+                progress_bar.progress(min(page / 30, 1.0))
+                time.sleep(0.2)
+                
+            except Exception as e:
+                st.error(f"Eroare fetch: {e}")
+                break
+        
+        progress_bar.empty()
+        status_text.empty()
+        
+        st.success(f"✅ Am găsit {len(woo_products)} produse în WooCommerce")
+        
+        # Step 3: Procesează
+        st.info("🔄 Procesez și actualizez...")
+        
+        prices_data = []
+        stock_data = []
+        attributes_data = []
+        matched_count = 0
+        not_matched = []
+        
+        progress_bar = st.progress(0)
+        
+        for idx, woo_product in enumerate(woo_products):
+            progress_bar.progress((idx + 1) / len(woo_products))
+            
+            try:
+                product_type = woo_product.get('type', 'simple')
+                woo_id = woo_product.get('id')
+                parent_name = woo_product.get('name', '')
+                
+                if product_type == 'simple':
+                    sku = woo_product.get('sku', '').strip()
+                    
+                    if sku and sku in sku_to_product:
+                        product_id = sku_to_product[sku]
+                        matched_count += 1
+                        
+                        prices_data.append((
+                            product_id, sku, woo_id, None,
+                            Decimal(woo_product.get('regular_price') or 0),
+                            Decimal(woo_product.get('sale_price') or 0) if woo_product.get('sale_price') else None
+                        ))
+                        
+                        stock_data.append((
+                            product_id, sku, woo_id, None,
+                            woo_product.get('stock_quantity') or 0
+                        ))
+                    elif sku:
+                        not_matched.append(sku)
+                
+                elif product_type == 'variable':
+                    try:
+                        var_response = wcapi.get(f"products/{woo_id}/variations", params={"per_page": 100})
+                        if var_response.status_code == 200:
+                            variations = var_response.json()
+                            
+                            for var in variations:
+                                var_sku = var.get('sku', '').strip()
+                                
+                                if var_sku and var_sku in sku_to_product:
+                                    var_product_id = sku_to_product[var_sku]
+                                    matched_count += 1
+                                    
+                                    prices_data.append((
+                                        var_product_id, var_sku, woo_id, var.get('id'),
+                                        Decimal(var.get('regular_price') or 0),
+                                        Decimal(var.get('sale_price') or 0) if var.get('sale_price') else None
+                                    ))
+                                    
+                                    stock_data.append((
+                                        var_product_id, var_sku, woo_id, var.get('id'),
+                                        var.get('stock_quantity') or 0
+                                    ))
+                                    
+                                    for attr in var.get('attributes', []):
+                                        attributes_data.append((
+                                            var_product_id, woo_id, var.get('id'),
+                                            attr.get('name', ''), attr.get('option', '')
+                                        ))
+                                elif var_sku:
+                                    not_matched.append(var_sku)
+                    except:
+                        pass
+            except:
+                pass
+        
+        progress_bar.empty()
+        
+        # Step 4: Bulk insert
+        if prices_data or stock_data:
+            st.info("💾 Salvez în baza de date...")
+            
+            try:
+                conn = get_db_connection()
+                cursor = conn.cursor()
+                
+                if prices_data:
+                    execute_batch(cursor, """
+                        INSERT INTO woo_preturi 
+                        (product_id, sku, woo_product_id, woo_variation_id, regular_price, sale_price)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (woo_product_id, woo_variation_id) DO UPDATE
+                        SET product_id = EXCLUDED.product_id,
+                            sku = EXCLUDED.sku,
+                            regular_price = EXCLUDED.regular_price,
+                            sale_price = EXCLUDED.sale_price,
+                            last_sync = NOW()
+                    """, prices_data)
+                
+                if stock_data:
+                    execute_batch(cursor, """
+                        INSERT INTO woo_stoc 
+                        (product_id, sku, woo_product_id, woo_variation_id, stock_quantity)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (woo_product_id, woo_variation_id) DO UPDATE
+                        SET product_id = EXCLUDED.product_id,
+                            sku = EXCLUDED.sku,
+                            stock_quantity = EXCLUDED.stock_quantity,
+                            last_sync = NOW()
+                    """, stock_data)
+                
+                if attributes_data:
+                    execute_batch(cursor, """
+                        INSERT INTO woo_variation_attributes 
+                        (product_id, woo_product_id, woo_variation_id, attribute_name, attribute_value)
+                        VALUES (%s, %s, %s, %s, %s)
+                        ON CONFLICT (woo_product_id, woo_variation_id, attribute_name) DO UPDATE
+                        SET product_id = EXCLUDED.product_id,
+                            attribute_value = EXCLUDED.attribute_value
+                    """, attributes_data)
+                
+                conn.commit()
+                cursor.close()
+                conn.close()
+                
+                st.success("✅ Quick Sync complet!")
+                st.balloons()
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("💰 Prețuri", len(prices_data))
+                with col2:
+                    st.metric("📦 Stocuri", len(stock_data))
+                with col3:
+                    st.metric("✅ Match-uri", matched_count)
+                with col4:
+                    st.metric("⚠️ Nematchate", len(set(not_matched)))
+                
+            except Exception as e:
+                st.error(f"Eroare salvare: {e}")
+        else:
+            st.warning("Nu am găsit date de sincronizat")
+    
+    st.session_state["quick_sync_running"] = False
+
 # =========================
 #   PHASE 1: EXTRACT
 # =========================
 def fetch_and_stage_products(session_id: str):
-    """
-    FAZA 1: Extract produse din WooCommerce și scrie în staging
-    Returnează statistici
-    """
+    """FAZA 1: Extract cu resume capability"""
     stats = {
         'total_products_fetched': 0,
         'total_variations_fetched': 0,
@@ -135,16 +385,21 @@ def fetch_and_stage_products(session_id: str):
         'errors': 0
     }
     
-    # Progress indicators
     progress_bar = st.progress(0)
     status_text = st.empty()
     
     try:
-        # Step 1: Fetch toate produsele (simple + variable)
+        # Check progress existent
+        existing_progress = get_staging_progress(session_id)
+        start_page = st.session_state.get("last_processed_page", 0) + 1
+        
+        if existing_progress['products_staged'] > 0:
+            st.info(f"📌 Reluare import: {existing_progress['products_staged']} produse deja în staging")
+        
         status_text.info("📥 Citesc lista produselor din WooCommerce...")
         
         all_products = []
-        page = 1
+        page = start_page
         per_page = 100
         
         while True:
@@ -163,9 +418,10 @@ def fetch_and_stage_products(session_id: str):
                     break
                 
                 all_products.extend(products)
+                st.session_state["last_processed_page"] = page
                 page += 1
                 
-                time.sleep(0.2)  # Rate limiting
+                time.sleep(0.2)
                 
             except Exception as e:
                 st.error(f"Eroare fetch produse: {e}")
@@ -173,12 +429,11 @@ def fetch_and_stage_products(session_id: str):
                 break
         
         stats['total_products_fetched'] = len(all_products)
-        status_text.success(f"✅ Am găsit {len(all_products)} produse în WooCommerce")
+        status_text.success(f"✅ Am găsit {len(all_products)} produse pe paginile procesate")
         
         if not all_products:
             return stats
         
-        # Step 2: Procesează și scrie în staging
         conn = get_db_connection()
         cursor = conn.cursor()
         
@@ -194,12 +449,10 @@ def fetch_and_stage_products(session_id: str):
                 product_id_woo = product.get('id')
                 parent_name = product.get('name', 'Produs fără nume')
                 
-                # SKIP parent-ul produselor variabile
                 if product_type == 'variable':
                     stats['variable_products'] += 1
-                    status_text.info(f"🔄 Procesez variații pentru: {parent_name}...")
+                    status_text.info(f"🔄 Procesez variații: {parent_name}...")
                     
-                    # Fetch variații
                     var_page = 1
                     while True:
                         try:
@@ -218,24 +471,27 @@ def fetch_and_stage_products(session_id: str):
                             
                             stats['total_variations_fetched'] += len(variations)
                             
-                            # Insert variații în batch
                             for variation in variations:
                                 var_sku = variation.get('sku', '').strip()
                                 var_name = compose_variation_name(parent_name, variation.get('attributes', []))
                                 
+                                # INSERT cu ON CONFLICT pentru a preveni duplicate
                                 cursor.execute("""
                                     INSERT INTO woo_staging_raw 
                                     (import_session_id, woo_product_id, woo_variation_id, product_type, 
                                      parent_name, sku, regular_price, sale_price, stock_quantity, attributes, raw_data)
                                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
-                                    ON CONFLICT (import_session_id, woo_product_id, woo_variation_id) DO NOTHING
+                                    ON CONFLICT (import_session_id, woo_product_id, woo_variation_id) DO UPDATE
+                                    SET parent_name = EXCLUDED.parent_name,
+                                        sku = EXCLUDED.sku,
+                                        regular_price = EXCLUDED.regular_price,
+                                        sale_price = EXCLUDED.sale_price,
+                                        stock_quantity = EXCLUDED.stock_quantity,
+                                        attributes = EXCLUDED.attributes,
+                                        raw_data = EXCLUDED.raw_data
                                 """, (
-                                    session_id,
-                                    product_id_woo,
-                                    variation.get('id'),
-                                    'variation',
-                                    var_name,
-                                    var_sku if var_sku else None,
+                                    session_id, product_id_woo, variation.get('id'), 'variation',
+                                    var_name, var_sku if var_sku else None,
                                     Decimal(variation.get('regular_price') or 0),
                                     Decimal(variation.get('sale_price') or 0) if variation.get('sale_price') else None,
                                     variation.get('stock_quantity') or 0,
@@ -247,14 +503,12 @@ def fetch_and_stage_products(session_id: str):
                             var_page += 1
                             
                         except Exception as e:
-                            st.warning(f"Eroare fetch variații pentru {product_id_woo}: {e}")
+                            st.warning(f"Eroare fetch variații {product_id_woo}: {e}")
                             stats['errors'] += 1
                             break
                 
-                # Produse SIMPLE
                 elif product_type == 'simple':
                     stats['simple_products'] += 1
-                    
                     sku = product.get('sku', '').strip()
                     
                     cursor.execute("""
@@ -262,14 +516,16 @@ def fetch_and_stage_products(session_id: str):
                         (import_session_id, woo_product_id, woo_variation_id, product_type, 
                          parent_name, sku, regular_price, sale_price, stock_quantity, attributes, raw_data)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
-                        ON CONFLICT (import_session_id, woo_product_id, woo_variation_id) DO NOTHING
+                        ON CONFLICT (import_session_id, woo_product_id, woo_variation_id) DO UPDATE
+                        SET parent_name = EXCLUDED.parent_name,
+                            sku = EXCLUDED.sku,
+                            regular_price = EXCLUDED.regular_price,
+                            sale_price = EXCLUDED.sale_price,
+                            stock_quantity = EXCLUDED.stock_quantity,
+                            raw_data = EXCLUDED.raw_data
                     """, (
-                        session_id,
-                        product_id_woo,
-                        None,
-                        'simple',
-                        parent_name,
-                        sku if sku else None,
+                        session_id, product_id_woo, None, 'simple',
+                        parent_name, sku if sku else None,
                         Decimal(product.get('regular_price') or 0),
                         Decimal(product.get('sale_price') or 0) if product.get('sale_price') else None,
                         product.get('stock_quantity') or 0,
@@ -277,8 +533,8 @@ def fetch_and_stage_products(session_id: str):
                         json.dumps(product)
                     ))
                 
-                # Commit la fiecare 50 produse
-                if processed % 50 == 0:
+                # Commit la fiecare 20 produse (batch mai mic pentru safety)
+                if processed % 20 == 0:
                     conn.commit()
                     status_text.info(f"💾 Salvat batch {processed}/{total_items}...")
             
@@ -286,38 +542,33 @@ def fetch_and_stage_products(session_id: str):
                 st.warning(f"Eroare procesare produs {product.get('id')}: {e}")
                 stats['errors'] += 1
         
-        # Final commit
         conn.commit()
         cursor.close()
         conn.close()
         
         progress_bar.empty()
-        status_text.success(f"✅ Extract complet: {stats['variations_inserted'] + stats['simple_products']} produse în staging")
+        status_text.success(f"✅ Extract complet: {stats['variations_inserted'] + stats['simple_products']} produse")
         
     except Exception as e:
-        st.error(f"Eroare FAZA 1 - Extract: {e}")
+        st.error(f"Eroare FAZA 1: {e}")
         stats['errors'] += 1
     
     return stats
 
 # =========================
-#   PHASE 2: TRANSFORM (MATCHING)
+#   PHASE 2: TRANSFORM
 # =========================
 def run_sku_matching(session_id: str):
-    """
-    FAZA 2: Rulează matching-ul SKU în PostgreSQL
-    """
+    """FAZA 2: Matching"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        st.info("🔍 Rulează matching SKU în PostgreSQL...")
+        st.info("🔍 Rulează matching SKU...")
         
-        # Rulează funcția de matching
         cursor.execute("SELECT * FROM match_skus_for_session(%s)", (session_id,))
         matches = cursor.fetchall()
         
-        # Inserează rezultatele în staging_matched
         for match in matches:
             staging_raw_id, sku, product_id, match_type, requires_action = match
             
@@ -325,11 +576,14 @@ def run_sku_matching(session_id: str):
                 INSERT INTO woo_staging_matched 
                 (import_session_id, staging_raw_id, sku, product_id, match_type, requires_action)
                 VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (import_session_id, staging_raw_id) DO UPDATE
+                SET product_id = EXCLUDED.product_id,
+                    match_type = EXCLUDED.match_type,
+                    requires_action = EXCLUDED.requires_action
             """, (session_id, staging_raw_id, sku, product_id, match_type, requires_action))
         
         conn.commit()
         
-        # Obține statistici
         cursor.execute("SELECT * FROM v_import_status WHERE import_session_id = %s", (session_id,))
         stats = cursor.fetchone()
         
@@ -347,11 +601,10 @@ def run_sku_matching(session_id: str):
                 'errors': stats[7],
                 'pending_actions': stats[8]
             }
-        else:
-            return {}
+        return {}
         
     except Exception as e:
-        st.error(f"Eroare FAZA 2 - Matching: {e}")
+        st.error(f"Eroare FAZA 2: {e}")
         return {}
 
 # =========================
@@ -365,15 +618,8 @@ def get_pending_items(session_id: str, match_type: str):
         
         cursor.execute("""
             SELECT 
-                sm.id as match_id,
-                sm.staging_raw_id,
-                sm.sku,
-                sm.product_id,
-                sm.match_type,
-                sr.parent_name,
-                sr.woo_product_id,
-                sr.woo_variation_id,
-                sr.raw_data
+                sm.id as match_id, sm.staging_raw_id, sm.sku, sm.product_id, sm.match_type,
+                sr.parent_name, sr.woo_product_id, sr.woo_variation_id, sr.raw_data
             FROM woo_staging_matched sm
             JOIN woo_staging_raw sr ON sr.id = sm.staging_raw_id
             WHERE sm.import_session_id = %s
@@ -381,6 +627,7 @@ def get_pending_items(session_id: str, match_type: str):
             AND sm.requires_action = true
             AND sm.action_taken IS NULL
             ORDER BY sr.parent_name
+            LIMIT 50
         """, (session_id, match_type))
         
         items = cursor.fetchall()
@@ -390,11 +637,11 @@ def get_pending_items(session_id: str, match_type: str):
         return items
         
     except Exception as e:
-        st.error(f"Eroare get pending items: {e}")
+        st.error(f"Eroare get pending: {e}")
         return []
 
 def mark_action_taken(match_id: str, action: str):
-    """Marchează că s-a luat o acțiune pentru un match"""
+    """Marchează acțiune"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -433,7 +680,7 @@ def create_new_product(name: str, sku: str):
         return None
 
 def save_mapping_decision(woo_sku: str, product_id: str, decision_type: str):
-    """Salvează decizia pentru viitor"""
+    """Salvează decizia"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -456,7 +703,7 @@ def save_mapping_decision(woo_sku: str, product_id: str, decision_type: str):
         return False
 
 def update_match_product_id(match_id: str, product_id: str):
-    """Update product_id pentru un match"""
+    """Update product_id"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -479,21 +726,17 @@ def update_match_product_id(match_id: str, product_id: str):
 #   PHASE 4: FINALIZE
 # =========================
 def finalize_import(session_id: str):
-    """
-    FAZA 4: Transfer din staging → production
-    """
+    """FAZA 4: Transfer"""
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        st.info("📦 Finalizare import - transfer staging → production...")
+        st.info("📦 Finalizare import...")
         
-        # Clear production tables
         cursor.execute("DELETE FROM woo_variation_attributes")
         cursor.execute("DELETE FROM woo_stoc")
         cursor.execute("DELETE FROM woo_preturi")
         
-        # Rulează funcția de finalizare
         cursor.execute("SELECT * FROM finalize_import(%s)", (session_id,))
         result = cursor.fetchone()
         
@@ -507,69 +750,69 @@ def finalize_import(session_id: str):
                 'stock_inserted': result[1],
                 'attributes_inserted': result[2]
             }
-        else:
-            return {}
+        return {}
         
     except Exception as e:
-        st.error(f"Eroare FAZA 4 - Finalizare: {e}")
+        st.error(f"Eroare FAZA 4: {e}")
         return {}
 
 # =========================
 #   MAIN UI
 # =========================
 st.markdown("### 🔄 Import din WooCommerce")
-st.info("**Arhitectură optimizată:** Extract → Match → Reconcile → Load (folosind tabele staging în PostgreSQL)")
+st.info("**2 moduri:** Full Import (ETL) sau Quick Sync (stoc + prețuri)")
 
-# Status bar
 if st.session_state["import_phase"]:
     phase_labels = {
-        'extracting': '📥 FAZA 1: Extragere date din WooCommerce',
-        'matching': '🔍 FAZA 2: Matching SKU-uri',
-        'reconciling': '🤔 FAZA 3: Reconciliere SKU-uri necunoscute',
-        'finalizing': '📦 FAZA 4: Finalizare import',
+        'extracting': '📥 FAZA 1: Extragere',
+        'matching': '🔍 FAZA 2: Matching',
+        'reconciling': '🤔 FAZA 3: Reconciliere',
+        'finalizing': '📦 FAZA 4: Finalizare',
         'done': '✅ Import complet'
     }
     st.info(f"**Status:** {phase_labels.get(st.session_state['import_phase'], 'Necunoscut')}")
 
-# Start import button
-col1, col2 = st.columns([3, 1])
+col1, col2 = st.columns(2)
 
 with col1:
-    st.markdown("**Strategie:** REPLACE ALL (șterge datele vechi și reimportă tot)")
-
-with col2:
-    if st.button("🚀 Start Import NOU", type="primary", use_container_width=True):
-        # Reset session
+    if st.button("🚀 Start Import NOU", type="primary", use_container_width=True, disabled=st.session_state["quick_sync_running"]):
         st.session_state["import_session_id"] = str(uuid.uuid4())
         st.session_state["import_phase"] = 'extracting'
         st.session_state["import_stats"] = {}
+        st.session_state["last_processed_page"] = 0
         
-        # Clear staging
-        clear_staging_tables()
+        # ȘTERGE STAGING COMPLET
+        with st.spinner("🗑️ Curăț staging..."):
+            clear_staging_tables()
         
         st.rerun()
 
+with col2:
+    if st.button("⚡ Quick Sync", use_container_width=True, disabled=st.session_state["quick_sync_running"]):
+        quick_sync_prices_and_stock()
+
+st.caption("**Full Import:** Prima dată | **Quick Sync:** Daily sync rapid")
 st.divider()
 
 # =========================
-#   IMPORT WORKFLOW
+#   WORKFLOW
 # =========================
 
 if st.session_state["import_session_id"] and st.session_state["import_phase"] == 'extracting':
-    st.markdown("### 📥 FAZA 1: Extragere date")
+    st.markdown("### 📥 FAZA 1: Extragere")
     
-    with st.spinner("Se extrag datele din WooCommerce..."):
+    with st.spinner("Extrag date..."):
         stats = fetch_and_stage_products(st.session_state["import_session_id"])
         st.session_state["import_stats"]['extract'] = stats
         st.session_state["import_phase"] = 'matching'
     
-    st.success(f"✅ Extract complet: {stats.get('variations_inserted', 0) + stats.get('simple_products', 0)} produse")
+    st.success(f"✅ Extract: {stats.get('variations_inserted', 0) + stats.get('simple_products', 0)} produse")
     st.rerun()
 
 if st.session_state["import_session_id"] and st.session_state["import_phase"] == 'matching':
-    st.markdown("### 🔍 FAZA 2: Matching SKU-uri")
+    st.markdown("### 🔍 FAZA 2: Matching")
     
-    with st.spinner("Se face matching-ul SKU-urilor..."):
+    with st.spinner("Matching SKU..."):
         match_stats = run_sku_matching(st.session_state["import_session_id"])
         st.session_state["import_stats"]['matching'] = match_stats
         st.session_state["import_phase"] = 'reconciling'
@@ -582,7 +825,6 @@ if st.session_state["import_session_id"] and st.session_state["import_phase"] ==
     
     match_stats = st.session_state["import_stats"].get('matching', {})
     
-    # Display stats
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.metric("✅ Match automat", match_stats.get('matched_primary', 0) + match_stats.get('matched_remembered', 0))
@@ -596,16 +838,14 @@ if st.session_state["import_session_id"] and st.session_state["import_phase"] ==
     pending = match_stats.get('pending_actions', 0)
     
     if pending == 0:
-        st.success("🎉 Nu sunt acțiuni pendinte! Poți finaliza import-ul.")
+        st.success("🎉 Nu sunt acțiuni pendinte!")
         
         if st.button("📦 Finalizează Import", type="primary"):
             st.session_state["import_phase"] = 'finalizing'
             st.rerun()
-    
     else:
         st.warning(f"⚠️ {pending} acțiuni necesită atenția ta")
         
-        # ALIASURI - confirmări
         alias_items = get_pending_items(st.session_state["import_session_id"], 'alias')
         
         if alias_items:
@@ -613,21 +853,19 @@ if st.session_state["import_session_id"] and st.session_state["import_phase"] ==
             
             for item in alias_items:
                 with st.expander(f"SKU: {item['sku']} → {item['parent_name']}"):
-                    st.info(f"Acest SKU există ca **ALIAS** pentru produsul cu ID: `{item['product_id']}`")
+                    st.info(f"Acest SKU e **ALIAS** pentru: `{item['product_id']}`")
                     
                     col1, col2 = st.columns(2)
                     with col1:
-                        if st.button(f"✅ Confirmă", key=f"confirm_{item['match_id']}"):
+                        if st.button(f"✅ Confirmă", key=f"conf_{item['match_id']}"):
                             save_mapping_decision(item['sku'], item['product_id'], 'confirmed_alias')
                             mark_action_taken(item['match_id'], 'confirmed')
-                            st.success("Confirmat!")
                             st.rerun()
                     with col2:
                         if st.button(f"❌ Skip", key=f"skip_{item['match_id']}"):
                             mark_action_taken(item['match_id'], 'skipped')
                             st.rerun()
         
-        # UNKNOWN - necunoscute
         unknown_items = get_pending_items(st.session_state["import_session_id"], 'unknown')
         
         if unknown_items:
@@ -635,31 +873,28 @@ if st.session_state["import_session_id"] and st.session_state["import_phase"] ==
             
             for item in unknown_items:
                 with st.expander(f"SKU: {item['sku']} - {item['parent_name']}"):
-                    
-                    if st.button(f"✅ Creează produs NOU", key=f"create_{item['match_id']}"):
+                    if st.button(f"✅ Creează NOU", key=f"create_{item['match_id']}"):
                         product_id = create_new_product(item['parent_name'], item['sku'])
                         
                         if product_id:
                             save_mapping_decision(item['sku'], product_id, 'new_product')
                             update_match_product_id(item['match_id'], product_id)
                             mark_action_taken(item['match_id'], 'created_new')
-                            st.success(f"Produs creat: {product_id}")
+                            st.success(f"Creat: {product_id}")
                             st.rerun()
         
-        # DUPLICATES
         duplicate_items = get_pending_items(st.session_state["import_session_id"], 'duplicate')
         
         if duplicate_items:
             st.markdown("#### ⚠️ SKU-uri duplicate")
-            st.error("Aceste SKU-uri apar în multiple produse! Trebuie rezolvate manual în 'Aliasuri SKU'")
-            
+            st.error("Rezolvă manual în 'Aliasuri SKU'")
             for item in duplicate_items:
                 st.write(f"- {item['sku']} - {item['parent_name']}")
 
 if st.session_state["import_session_id"] and st.session_state["import_phase"] == 'finalizing':
     st.markdown("### 📦 FAZA 4: Finalizare")
     
-    with st.spinner("Se transferă datele staging → production..."):
+    with st.spinner("Transfer staging → production..."):
         final_stats = finalize_import(st.session_state["import_session_id"])
         st.session_state["import_stats"]['finalize'] = final_stats
         st.session_state["import_phase"] = 'done'
@@ -681,16 +916,14 @@ if st.session_state["import_session_id"] and st.session_state["import_phase"] ==
     with col3:
         st.metric("🏷️ Atribute", final_stats.get('attributes_inserted', 0))
     
-    if st.button("🧹 Curăță staging și reset"):
+    if st.button("🧹 Curăță și reset"):
         clear_staging_tables(st.session_state["import_session_id"])
         st.session_state["import_session_id"] = None
         st.session_state["import_phase"] = None
         st.session_state["import_stats"] = {}
+        st.session_state["last_processed_page"] = 0
         st.rerun()
 
-# =========================
-#   FOOTER
-# =========================
 st.divider()
-st.caption("💡 **Arhitectură:** Extract (WooCommerce → Staging) → Transform (SQL matching) → Load (Staging → Production)")
-st.caption("🔌 **Conexiune:** PostgreSQL direct + WooCommerce REST API")
+st.caption("💡 **Full Import:** ETL complet | **Quick Sync:** Rapid pentru produse cunoscute")
+st.caption("🔌 PostgreSQL direct + WooCommerce API")

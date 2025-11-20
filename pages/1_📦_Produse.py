@@ -43,9 +43,9 @@ def init_smartbill():
     """SmartBill API config"""
     try:
         return {
-            'email': st.secrets["connections"]["smartbill"]["SMARTBILL_EMAIL"],
-            'token': st.secrets["connections"]["smartbill"]["SMARTBILL_TOKEN"],
-            'cif': st.secrets["connections"]["smartbill"]["SMARTBILL_CIF"],
+            'email': st.secrets["connections"]["smartbill"]["EMAIL"],
+            'token': st.secrets["connections"]["smartbill"]["TOKEN"],
+            'cif': st.secrets["connections"]["smartbill"]["CIF"],
             'base_url': 'https://ws.smartbill.ro/SBORO/api'
         }
     except KeyError:

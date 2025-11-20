@@ -64,34 +64,59 @@ def canon_sku(x: str) -> str:
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_products(q: str | None):
     """
-    Citește din view-ul public.v_aliases_by_product
-    Filtrează după nume dacă e specificat un query
+    Citește direct din tabelele product și product_sku (bypass view)
+    Construiește manual structura cu primary_sku și alias_skus
     """
-    rng = 1000
-    start = 0
-    rows = []
-    
     with st.spinner("📡 Se încarcă produsele din Supabase..."):
-        while True:
-            sel = client.table("v_aliases_by_product").select("*")
+        try:
+            # Obține produsele cu filtrare opțională
             if q:
-                sel = sel.ilike("name", f"%{q}%")
-            resp = sel.order("name").range(start, start + rng - 1).execute()
-            data = resp.data or []
-            rows.extend(data)
-            if len(data) < rng:
-                break
-            start += rng
-    
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return pd.DataFrame(columns=["product_id", "name", "primary_sku", "alias_skus"])
-    
-    # Asigură-te că alias_skus e listă
-    if "alias_skus" in df.columns:
-        df["alias_skus"] = df["alias_skus"].apply(lambda v: v if isinstance(v, list) else [])
-    
-    return df
+                products_resp = client.table("product").select("id, name").ilike("name", f"%{q}%").order("name").limit(500).execute()
+            else:
+                products_resp = client.table("product").select("id, name").order("name").limit(500).execute()
+            
+            products = products_resp.data or []
+            
+            if not products:
+                return pd.DataFrame(columns=["product_id", "name", "primary_sku", "alias_skus"])
+            
+            # Obține toate product IDs
+            product_ids = [p["id"] for p in products]
+            
+            # Obține toate SKU-urile pentru aceste produse într-un singur query
+            skus_resp = client.table("product_sku").select("sku, product_id, is_primary").in_("product_id", product_ids).execute()
+            skus = skus_resp.data or []
+            
+            # Grupează SKU-urile pe product_id
+            sku_map = {}
+            for sku_row in skus:
+                pid = sku_row["product_id"]
+                if pid not in sku_map:
+                    sku_map[pid] = {"primary": None, "aliases": []}
+                
+                if sku_row.get("is_primary"):
+                    sku_map[pid]["primary"] = sku_row["sku"]
+                else:
+                    sku_map[pid]["aliases"].append(sku_row["sku"])
+            
+            # Construiește DataFrame final
+            rows = []
+            for product in products:
+                pid = product["id"]
+                sku_data = sku_map.get(pid, {"primary": None, "aliases": []})
+                
+                rows.append({
+                    "product_id": pid,
+                    "name": product["name"],
+                    "primary_sku": sku_data["primary"] or "",
+                    "alias_skus": sku_data["aliases"]
+                })
+            
+            return pd.DataFrame(rows)
+            
+        except Exception as e:
+            st.error(f"❌ Eroare la citirea din Supabase: {str(e)}")
+            return pd.DataFrame(columns=["product_id", "name", "primary_sku", "alias_skus"])
 
 def rpc_add_alias(product_id: str, new_sku: str):
     """Apelează funcția RPC pentru adăugare alias"""

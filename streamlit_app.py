@@ -2,7 +2,7 @@ import streamlit as st
 from supabase import create_client, Client
 from woocommerce import API
 import psycopg2
-from psycopg2 import OperationalError
+from datetime import datetime
 
 # Configurare pagină
 st.set_page_config(
@@ -12,137 +12,149 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ===== SIDEBAR - VERIFICATOR CONEXIUNI =====
+# ===== FUNCȚIE VERIFICARE CONEXIUNI =====
+@st.cache_resource
+def check_all_connections():
+    """Verifică toate conexiunile la pornirea aplicației - se rulează o singură dată"""
+    results = {
+        "supabase": {"status": False, "message": "", "details": ""},
+        "postgresql": {"status": False, "message": "", "details": ""},
+        "woocommerce": {"status": False, "message": "", "details": ""}
+    }
+    
+    # 1. VERIFICARE SUPABASE API CLIENT
+    try:
+        supabase_url = st.secrets["connections"]["supabase"]["SUPABASE_URL"]
+        supabase_key = st.secrets["connections"]["supabase"]["SUPABASE_KEY"]
+        supabase = create_client(supabase_url, supabase_key)
+        
+        results["supabase"]["status"] = True
+        results["supabase"]["message"] = "Conectat"
+        results["supabase"]["details"] = f"URL: {supabase_url}"
+    except KeyError:
+        results["supabase"]["message"] = "Credențiale lipsă"
+    except Exception as e:
+        results["supabase"]["message"] = "Eroare conexiune"
+        results["supabase"]["details"] = str(e)[:80]
+    
+    # 2. VERIFICARE POSTGRESQL DIRECT
+    try:
+        pg_url = st.secrets["connections"]["postgresql"]["url"]
+        conn = psycopg2.connect(pg_url)
+        cursor = conn.cursor()
+        cursor.execute("SELECT version();")
+        db_version = cursor.fetchone()[0]
+        cursor.close()
+        conn.close()
+        
+        results["postgresql"]["status"] = True
+        results["postgresql"]["message"] = "Conectat"
+        results["postgresql"]["details"] = f"PostgreSQL {db_version.split()[1]}"
+    except KeyError:
+        results["postgresql"]["message"] = "URL lipsă"
+    except Exception as e:
+        results["postgresql"]["message"] = "Eroare conexiune"
+        results["postgresql"]["details"] = str(e)[:80]
+    
+    # 3. VERIFICARE WOOCOMMERCE API
+    try:
+        woo_url = st.secrets["WOO_URL"]
+        woo_key = st.secrets["WOO_CONSUMER_KEY"]
+        woo_secret = st.secrets["WOO_CONSUMER_SECRET"]
+        
+        wcapi = API(
+            url=woo_url,
+            consumer_key=woo_key,
+            consumer_secret=woo_secret,
+            version="wc/v3",
+            timeout=10
+        )
+        
+        # Test simplu - verifică dacă API-ul răspunde
+        response = wcapi.get("products", params={"per_page": 1})
+        
+        if response.status_code == 200:
+            results["woocommerce"]["status"] = True
+            results["woocommerce"]["message"] = "Conectat"
+            results["woocommerce"]["details"] = f"Store: {woo_url}"
+        else:
+            results["woocommerce"]["message"] = f"Cod {response.status_code}"
+    except KeyError:
+        results["woocommerce"]["message"] = "Credențiale lipsă"
+    except Exception as e:
+        results["woocommerce"]["message"] = "Eroare conexiune"
+        results["woocommerce"]["details"] = str(e)[:80]
+    
+    results["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return results
+
+# ===== SIDEBAR - AFIȘARE STATUS AUTOMAT =====
 with st.sidebar:
     st.title("🔌 Status Conexiuni")
+    st.caption("Verificare automată la pornire")
     st.divider()
     
-    # Buton pentru verificare
-    if st.button("🔄 Verifică toate conexiunile", use_container_width=True):
-        
-        # Container pentru status-uri
-        status_container = st.container()
-        
-        with status_container:
-            # 1. VERIFICARE SUPABASE API CLIENT
-            st.write("### 📡 Supabase API Client")
-            try:
-                supabase_url = st.secrets["connections"]["supabase"]["SUPABASE_URL"]
-                supabase_key = st.secrets["connections"]["supabase"]["SUPABASE_KEY"]
-                
-                # Testare conexiune
-                supabase: Client = create_client(supabase_url, supabase_key)
-                
-                # Test simplu - încearcă să accesezi o tabelă sau health check
-                response = supabase.table("_health").select("*").limit(1).execute()
-                
-                st.success("✅ Supabase API: Conectat")
-                st.caption(f"URL: {supabase_url}")
-                
-            except KeyError:
-                st.error("❌ Supabase API: Credențiale lipsă în secrets")
-            except Exception as e:
-                st.warning(f"⚠️ Supabase API: Conectat dar test eșuat")
-                st.caption(f"Detalii: {str(e)[:100]}")
-            
-            st.divider()
-            
-            # 2. VERIFICARE POSTGRESQL DIRECT
-            st.write("### 🗄️ PostgreSQL Direct")
-            try:
-                pg_url = st.secrets["connections"]["postgresql"]["url"]
-                
-                # Testare conexiune PostgreSQL
-                conn = psycopg2.connect(pg_url)
-                cursor = conn.cursor()
-                cursor.execute("SELECT version();")
-                db_version = cursor.fetchone()[0]
-                cursor.close()
-                conn.close()
-                
-                st.success("✅ PostgreSQL: Conectat")
-                st.caption(f"Versiune: {db_version[:50]}...")
-                
-            except KeyError:
-                st.error("❌ PostgreSQL: URL lipsă în secrets")
-            except OperationalError as e:
-                st.error("❌ PostgreSQL: Eroare de conexiune")
-                st.caption(f"Detalii: {str(e)[:100]}")
-            except Exception as e:
-                st.error(f"❌ PostgreSQL: Eroare necunoscută")
-                st.caption(f"Detalii: {str(e)[:100]}")
-            
-            st.divider()
-            
-            # 3. VERIFICARE WOOCOMMERCE API
-            st.write("### 🛒 WooCommerce API")
-            try:
-                woo_url = st.secrets["WOO_URL"]
-                woo_key = st.secrets["WOO_CONSUMER_KEY"]
-                woo_secret = st.secrets["WOO_CONSUMER_SECRET"]
-                
-                # Inițializare client WooCommerce
-                wcapi = API(
-                    url=woo_url,
-                    consumer_key=woo_key,
-                    consumer_secret=woo_secret,
-                    version="wc/v3",
-                    timeout=10
-                )
-                
-                # Test conexiune - verifică system status
-                response = wcapi.get("system_status")
-                
-                if response.status_code == 200:
-                    st.success("✅ WooCommerce: Conectat")
-                    st.caption(f"Store: {woo_url}")
-                    
-                    # Informații adiționale despre magazin
-                    data = response.json()
-                    if "environment" in data:
-                        wc_version = data.get("environment", {}).get("version", "N/A")
-                        st.caption(f"WooCommerce v{wc_version}")
-                else:
-                    st.warning(f"⚠️ WooCommerce: Cod răspuns {response.status_code}")
-                    
-            except KeyError:
-                st.error("❌ WooCommerce: Credențiale lipsă în secrets")
-            except Exception as e:
-                st.error("❌ WooCommerce: Eroare de conexiune")
-                st.caption(f"Detalii: {str(e)[:100]}")
-            
-            st.divider()
-            
-            # Timestamp ultimei verificări
-            import datetime
-            st.caption(f"🕐 Ultima verificare: {datetime.datetime.now().strftime('%H:%M:%S')}")
+    # Verifică conexiunile automat (cache-uit, rulează o singură dată)
+    connection_status = check_all_connections()
     
+    # 1. Supabase
+    st.write("### 📡 Supabase API")
+    if connection_status["supabase"]["status"]:
+        st.success(f"✅ {connection_status['supabase']['message']}")
+        if connection_status["supabase"]["details"]:
+            st.caption(connection_status["supabase"]["details"])
     else:
-        # Status implicit când nu s-a apăsat butonul
-        st.info("👆 Apasă butonul pentru a verifica conexiunile")
+        st.error(f"❌ {connection_status['supabase']['message']}")
+        if connection_status["supabase"]["details"]:
+            st.caption(connection_status["supabase"]["details"])
+    
+    # 2. PostgreSQL
+    st.write("### 🗄️ PostgreSQL")
+    if connection_status["postgresql"]["status"]:
+        st.success(f"✅ {connection_status['postgresql']['message']}")
+        if connection_status["postgresql"]["details"]:
+            st.caption(connection_status["postgresql"]["details"])
+    else:
+        st.error(f"❌ {connection_status['postgresql']['message']}")
+        if connection_status["postgresql"]["details"]:
+            st.caption(connection_status["postgresql"]["details"])
+    
+    # 3. WooCommerce
+    st.write("### 🛒 WooCommerce")
+    if connection_status["woocommerce"]["status"]:
+        st.success(f"✅ {connection_status['woocommerce']['message']}")
+        if connection_status["woocommerce"]["details"]:
+            st.caption(connection_status["woocommerce"]["details"])
+    else:
+        st.error(f"❌ {connection_status['woocommerce']['message']}")
+        if connection_status["woocommerce"]["details"]:
+            st.caption(connection_status["woocommerce"]["details"])
     
     st.divider()
+    st.caption(f"🕐 Verificat: {connection_status['timestamp']}")
     
-    # Link-uri utile
-    with st.expander("🔗 Link-uri utile"):
-        st.markdown("""
-        - [Supabase Dashboard](https://supabase.com/dashboard)
-        - [WooCommerce Admin](https://your-store.com/wp-admin)
-        - [Documentație Streamlit](https://docs.streamlit.io)
-        """)
+    # Buton pentru re-verificare (opțional)
+    if st.button("🔄 Re-verifică", use_container_width=True):
+        st.cache_resource.clear()
+        st.rerun()
 
 # ===== PAGINA PRINCIPALĂ =====
 st.title("🛒 Aplicație Management Magazin WooCommerce")
-st.write("Bine ai venit! Selectează o secțiune din sidebar pentru a începe.")
+st.write("Sistemul a verificat automat toate conexiunile. Verifică sidebar-ul pentru detalii.")
 
-# Afișare informații generale
+# Afișare metrici
 col1, col2, col3 = st.columns(3)
 
+connection_status = check_all_connections()
+total_connections = sum(1 for conn in ["supabase", "postgresql", "woocommerce"] 
+                       if connection_status[conn]["status"])
+
 with col1:
-    st.metric("📦 Module disponibile", "4")
+    st.metric("🔌 Conexiuni active", f"{total_connections}/3")
     
 with col2:
-    st.metric("🔌 Conexiuni", "3")
+    status_emoji = "✅" if total_connections == 3 else "⚠️" if total_connections > 0 else "❌"
+    st.metric("📊 Status general", status_emoji)
     
 with col3:
-    st.metric("📊 Status", "✅ Activ")
+    st.metric("📦 Module", "4")

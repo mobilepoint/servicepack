@@ -68,55 +68,52 @@ def check_all_connections():
         results["postgresql"]["details"] = str(e)[:80]
     
     # 3. VERIFICARE WOOCOMMERCE API
+try:
+    # Acum accesăm din secțiunea [connections.woocommerce]
+    woo_url = st.secrets["connections"]["woocommerce"]["WOO_URL"]
+    woo_key = st.secrets["connections"]["woocommerce"]["WOO_CONSUMER_KEY"]
+    woo_secret = st.secrets["connections"]["woocommerce"]["WOO_CONSUMER_SECRET"]
+    
+    # Inițializare cu timeout mărit
+    wcapi = API(
+        url=woo_url,
+        consumer_key=woo_key,
+        consumer_secret=woo_secret,
+        version="wc/v3",
+        timeout=15
+    )
+    
+    # Test simplu - verifică endpoint-ul de sistem
     try:
-        woo_url = st.secrets["WOO_URL"]
-        woo_key = st.secrets["WOO_CONSUMER_KEY"]
-        woo_secret = st.secrets["WOO_CONSUMER_SECRET"]
+        response = wcapi.get("")
         
-        # Inițializare cu timeout mărit la 15 secunde
-        wcapi = API(
-            url=woo_url,
-            consumer_key=woo_key,
-            consumer_secret=woo_secret,
-            version="wc/v3",
-            timeout=15  # Timeout mărit pentru stabilitate
-        )
-        
-        # Test simplu - verifică endpoint-ul de sistem
+        if response.status_code in range(200, 300) or response.status_code == 401:
+            results["woocommerce"]["status"] = True
+            results["woocommerce"]["message"] = "Conectat"
+            results["woocommerce"]["details"] = f"Store: {woo_url}"
+        else:
+            results["woocommerce"]["message"] = f"Cod HTTP {response.status_code}"
+            results["woocommerce"]["details"] = "Verifică credențialele"
+    except Exception as req_error:
+        # Test alternativ cu produse
         try:
-            response = wcapi.get("")
-            
-            # Cod 200-299 = succes, 401 = autentificat dar fără permisiuni (tot OK)
-            if response.status_code in range(200, 300) or response.status_code == 401:
+            response2 = wcapi.get("products", params={"per_page": 1})
+            if response2.status_code in range(200, 300):
                 results["woocommerce"]["status"] = True
                 results["woocommerce"]["message"] = "Conectat"
                 results["woocommerce"]["details"] = f"Store: {woo_url}"
             else:
-                results["woocommerce"]["message"] = f"Cod HTTP {response.status_code}"
-                results["woocommerce"]["details"] = "Verifică credențialele"
-        except Exception as req_error:
-            # Dacă există eroare de request, încearcă un endpoint mai simplu
-            try:
-                # Test alternativ - verifică produse
-                response2 = wcapi.get("products", params={"per_page": 1})
-                if response2.status_code in range(200, 300):
-                    results["woocommerce"]["status"] = True
-                    results["woocommerce"]["message"] = "Conectat"
-                    results["woocommerce"]["details"] = f"Store: {woo_url}"
-                else:
-                    results["woocommerce"]["message"] = f"Cod {response2.status_code}"
-            except:
-                results["woocommerce"]["message"] = "Eroare conexiune"
-                results["woocommerce"]["details"] = str(req_error)[:80]
-                
-    except KeyError:
-        results["woocommerce"]["message"] = "Credențiale lipsă"
-    except Exception as e:
-        results["woocommerce"]["message"] = "Eroare conexiune"
-        results["woocommerce"]["details"] = str(e)[:80]
-    
-    results["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return results
+                results["woocommerce"]["message"] = f"Cod {response2.status_code}"
+        except:
+            results["woocommerce"]["message"] = "Eroare conexiune"
+            results["woocommerce"]["details"] = str(req_error)[:80]
+            
+except KeyError:
+    results["woocommerce"]["message"] = "Credențiale lipsă"
+except Exception as e:
+    results["woocommerce"]["message"] = "Eroare conexiune"
+    results["woocommerce"]["details"] = str(e)[:80]
+
 
 # ===== SIDEBAR - AFIȘARE STATUS AUTOMAT =====
 with st.sidebar:

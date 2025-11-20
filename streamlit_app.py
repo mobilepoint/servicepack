@@ -1,5 +1,4 @@
 import streamlit as st
-from supabase import create_client, Client
 from woocommerce import API
 import psycopg2
 import requests
@@ -19,28 +18,12 @@ st.set_page_config(
 def check_all_connections():
     """Verifică toate conexiunile la pornirea aplicației - se rulează o singură dată"""
     results = {
-        "supabase": {"status": False, "message": "", "details": ""},
         "postgresql": {"status": False, "message": "", "details": ""},
         "woocommerce": {"status": False, "message": "", "details": ""},
         "smartbill": {"status": False, "message": "", "details": ""}
     }
     
-    # 1. VERIFICARE SUPABASE API CLIENT
-    try:
-        supabase_url = st.secrets["connections"]["supabase"]["SUPABASE_URL"]
-        supabase_key = st.secrets["connections"]["supabase"]["SUPABASE_KEY"]
-        supabase = create_client(supabase_url, supabase_key)
-        
-        results["supabase"]["status"] = True
-        results["supabase"]["message"] = "Conectat"
-        results["supabase"]["details"] = f"URL: {supabase_url}"
-    except KeyError:
-        results["supabase"]["message"] = "Credențiale lipsă"
-    except Exception as e:
-        results["supabase"]["message"] = "Eroare conexiune"
-        results["supabase"]["details"] = str(e)[:80]
-    
-    # 2. VERIFICARE POSTGRESQL DIRECT
+    # 1. VERIFICARE POSTGRESQL DIRECT
     try:
         pg_url = st.secrets["connections"]["postgresql"]["url"]
         
@@ -66,7 +49,7 @@ def check_all_connections():
         results["postgresql"]["message"] = "Eroare necunoscută"
         results["postgresql"]["details"] = str(e)[:80]
     
-    # 3. VERIFICARE WOOCOMMERCE API
+    # 2. VERIFICARE WOOCOMMERCE API
     try:
         woo_url = st.secrets["connections"]["woocommerce"]["WOO_URL"]
         woo_key = st.secrets["connections"]["woocommerce"]["WOO_CONSUMER_KEY"]
@@ -109,24 +92,25 @@ def check_all_connections():
         results["woocommerce"]["message"] = "Eroare conexiune"
         results["woocommerce"]["details"] = str(e)[:80]
     
-    # 4. VERIFICARE SMARTBILL API
+    # 3. VERIFICARE SMARTBILL API
     try:
-        sb_username = st.secrets["connections"]["smartbill"]["SMARTBILL_USERNAME"]
-        sb_token = st.secrets["connections"]["smartbill"]["SMARTBILL_TOKEN"]
+        sb_email = st.secrets["connections"]["smartbill"]["EMAIL"]
+        sb_token = st.secrets["connections"]["smartbill"]["TOKEN"]
+        sb_cif = st.secrets["connections"]["smartbill"]["CIF"]
         
         # Test endpoint SmartBill
         url = "https://ws.smartbill.ro/SBORO/api/misc/test"
-        auth = HTTPBasicAuth(sb_username, sb_token)
+        auth = HTTPBasicAuth(sb_email, sb_token)
         
         response = requests.get(url, auth=auth, timeout=10)
         
         if response.status_code == 200:
             results["smartbill"]["status"] = True
             results["smartbill"]["message"] = "Conectat"
-            results["smartbill"]["details"] = f"User: {sb_username}"
+            results["smartbill"]["details"] = f"CIF: {sb_cif}"
         elif response.status_code == 401:
             results["smartbill"]["message"] = "Autentificare eșuată"
-            results["smartbill"]["details"] = "Verifică username/token"
+            results["smartbill"]["details"] = "Verifică email/token"
         else:
             results["smartbill"]["message"] = f"Cod HTTP {response.status_code}"
             
@@ -149,18 +133,7 @@ with st.sidebar:
     
     connection_status = check_all_connections()
     
-    # 1. Supabase API
-    st.write("### 📡 Supabase")
-    if connection_status["supabase"]["status"]:
-        st.success(f"✅ {connection_status['supabase']['message']}")
-        if connection_status["supabase"]["details"]:
-            st.caption(connection_status["supabase"]["details"])
-    else:
-        st.error(f"❌ {connection_status['supabase']['message']}")
-        if connection_status["supabase"]["details"]:
-            st.caption(connection_status["supabase"]["details"])
-    
-    # 2. PostgreSQL Direct
+    # 1. PostgreSQL Direct
     st.write("### 🗄️ PostgreSQL")
     if connection_status["postgresql"]["status"]:
         st.success(f"✅ {connection_status['postgresql']['message']}")
@@ -171,7 +144,7 @@ with st.sidebar:
         if connection_status["postgresql"]["details"]:
             st.caption(connection_status["postgresql"]["details"])
     
-    # 3. WooCommerce API
+    # 2. WooCommerce API
     st.write("### 🛒 WooCommerce")
     if connection_status["woocommerce"]["status"]:
         st.success(f"✅ {connection_status['woocommerce']['message']}")
@@ -182,7 +155,7 @@ with st.sidebar:
         if connection_status["woocommerce"]["details"]:
             st.caption(connection_status["woocommerce"]["details"])
     
-    # 4. SmartBill API
+    # 3. SmartBill API
     st.write("### 🧾 SmartBill")
     if connection_status["smartbill"]["status"]:
         st.success(f"✅ {connection_status['smartbill']['message']}")
@@ -204,9 +177,9 @@ with st.sidebar:
     
     with st.expander("🔗 Link-uri utile"):
         st.markdown("""
-        - [Supabase Dashboard](https://supabase.com/dashboard)
         - [WooCommerce Admin](https://servicepack.ro/wp-admin)
         - [SmartBill Dashboard](https://www.smartbill.ro)
+        - [PostgreSQL Info](https://www.postgresql.org)
         """)
 
 # ===== PAGINA PRINCIPALĂ =====
@@ -218,18 +191,18 @@ st.divider()
 col1, col2, col3 = st.columns(3)
 
 connection_status = check_all_connections()
-total_connections = sum(1 for conn in ["supabase", "postgresql", "woocommerce", "smartbill"] 
+total_connections = sum(1 for conn in ["postgresql", "woocommerce", "smartbill"] 
                        if connection_status[conn]["status"])
 
 with col1:
     st.metric(
         label="🔌 Conexiuni active",
-        value=f"{total_connections}/4",
-        delta="Toate funcționale" if total_connections == 4 else f"{4-total_connections} inactive"
+        value=f"{total_connections}/3",
+        delta="Toate funcționale" if total_connections == 3 else f"{3-total_connections} inactive"
     )
     
 with col2:
-    status_emoji = "✅ Activ" if total_connections == 4 else "⚠️ Parțial" if total_connections > 0 else "❌ Inactiv"
+    status_emoji = "✅ Activ" if total_connections == 3 else "⚠️ Parțial" if total_connections > 0 else "❌ Inactiv"
     st.metric(
         label="📊 Status general",
         value=status_emoji
@@ -245,7 +218,7 @@ with col3:
 st.divider()
 
 # Status detaliat bazat pe conexiuni
-if total_connections == 4:
+if total_connections == 3:
     st.success("✅ **Toate conexiunile sunt active!** Poți începe să lucrezi cu aplicația.")
 elif total_connections > 0:
     st.warning("⚠️ **Unele conexiuni au eșuat.** Verifică detaliile în sidebar și corectează credențialele.")

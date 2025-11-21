@@ -615,56 +615,46 @@ def save_smartbill_decisions_batch(decisions_list):
 def parse_smartbill_xlsx(uploaded_file):
     import pandas as pd
     try:
-        df = pd.read_excel(uploaded_file, sheet_name=0, header=None)
-
-        # Găsește rândul cu antetul real, robust la spații
-        header_row = None
-        for idx, row in df.iterrows():
-            row_str = [str(cell).strip().lower() for cell in row.values]
-            if any(cell.startswith("cod") for cell in row_str) and any(cell.startswith("cantit") for cell in row_str):
-                header_row = idx
-                break
-        if header_row is None:
-            st.error("Nu am găsit antetul de coloană (ex: 'Cod', 'Cantitati' etc.) în Excel.")
-            return None
-
-        uploaded_file.seek(0)
-        df = pd.read_excel(uploaded_file, sheet_name=0, header=header_row)
-        df.columns = df.columns.str.strip()
-
-        col_map = {}
+        # Header e mereu pe linia 10 (index 9), restul sunt date
+        df = pd.read_excel(uploaded_file, sheet_name=0, header=9)
+        df.columns = df.columns.str.strip()  # Curăță spațiile
+        
+        # Folosește exact denumirile din sheet
+        col_sku = None
+        col_stoc_final = None
+        col_cost_unitar = None
         for col in df.columns:
             cl = col.strip().lower()
-            if cl.startswith("cod"):
-                col_map['sku'] = col
-            elif cl.startswith("cantit"):
-                col_map['cantitate'] = col
-            elif cl.startswith("valo"):
-                col_map['pret_unitar'] = col
-        if 'sku' not in col_map:
-            st.error("❌ Nu am găsit coloana 'Cod' (SKU)")
-            st.info(f"Coloane detectate: {list(df.columns)}")
+            if cl == "cod":
+                col_sku = col
+            elif "stoc final" in cl:
+                col_stoc_final = col
+            elif "cost unitar" in cl:
+                col_cost_unitar = col
+        
+        if not (col_sku and col_stoc_final and col_cost_unitar):
+            st.error("Nu am găsit coloanele esențiale: Cod, Stoc final, Cost unitar.")
+            st.info(f"Coloane găsite: {list(df.columns)}")
             return None
 
         entries = []
         skipped = 0
-        for idx, row in df.iterrows():
+        for _, row in df.iterrows():
             try:
-                sku = str(row[col_map['sku']]).strip()
+                sku = str(row[col_sku]).strip()
                 if not sku or sku == 'nan' or sku == '' or sku.lower() == 'none':
                     skipped += 1
                     continue
-                cantitate = safe_decimal(row.get(col_map.get('cantitate', ''), 0))
-                pret_unitar = safe_decimal(row.get(col_map.get('pret_unitar', ''), 0))
-                data_doc = datetime.now().date()
-                if cantitate > 0:
+                stoc_final = safe_decimal(row.get(col_stoc_final, 0))
+                cost_unitar = safe_decimal(row.get(col_cost_unitar, 0))
+                if stoc_final > 0:
                     entries.append({
                         'sku': sku,
-                        'cantitate': cantitate,
-                        'pret_unitar': pret_unitar,
-                        'data_document': data_doc
+                        'cantitate': stoc_final,
+                        'pret_unitar': cost_unitar,
+                        'data_document': datetime.now().date()
                     })
-            except Exception as row_err:
+            except Exception:
                 skipped += 1
                 continue
         if entries:
@@ -675,6 +665,7 @@ def parse_smartbill_xlsx(uploaded_file):
     except Exception as e:
         st.error(f"❌ Eroare citire XLS: {e}")
         return None
+
 
         
         # Recitește fișierul cu acel header

@@ -12,6 +12,7 @@ import requests
 from requests.auth import HTTPBasicAuth
 import pandas as pd
 import time
+import openpyxl  # Pentru Excel modern (.xlsx)
 
 st.set_page_config(page_title="Produse WooCommerce & SmartBill", layout="wide")
 st.title("📦 Import Produse")
@@ -501,7 +502,12 @@ def finalize_import(session_id: str):
 # =========================
 
 def get_smartbill_stocks(email, token, cif):
+    """Preia stocuri SmartBill via API cu informații detaliate"""
+    status_container = st.empty()
+    
     try:
+        status_container.info("🔄 Conectare la SmartBill API...")
+        
         r = requests.get(
             "https://ws.smartbill.ro/SBORO/api/stocks",
             auth=HTTPBasicAuth(email, token),
@@ -509,36 +515,89 @@ def get_smartbill_stocks(email, token, cif):
             params={"cif": cif, "date": datetime.now().strftime("%Y-%m-%d")},
             timeout=30
         )
+        
         if r.status_code == 200:
-            return r.json()
+            status_container.success(f"✅ Răspuns primit cu succes de la SmartBill (HTTP {r.status_code})")
+            
+            try:
+                data = r.json()
+                status_container.info("📊 Procesez datele JSON...")
+                return data
+            except Exception as json_err:
+                status_container.error(f"❌ Eroare procesare JSON: {json_err}")
+                return None
         else:
-            st.error(f"SmartBill API error: {r.status_code} - {r.text}")
+            status_container.error(f"❌ SmartBill API Error: HTTP {r.status_code}")
+            status_container.error(f"📄 Răspuns: {r.text[:500]}")
             return None
+    except requests.exceptions.Timeout:
+        status_container.error("❌ Timeout - SmartBill nu a răspuns în 30 secunde")
+        return None
+    except requests.exceptions.ConnectionError:
+        status_container.error("❌ Eroare conexiune - verificați conexiunea la internet")
+        return None
     except Exception as e:
-        st.error(f"Error fetching SmartBill: {e}")
+        status_container.error(f"❌ Eroare neașteptată la fetch SmartBill: {type(e).__name__}: {e}")
         return None
 
 def process_smartbill_data(data):
+    """Procesează răspunsul SmartBill și returnează dicționar cu produse"""
     sb_dict = {}
+    
     if not data:
+        st.warning("⚠️ Nu am primit date de la SmartBill")
         return sb_dict
     
-    products = []
-    if isinstance(data, dict) and "list" in data:
-        for w in data["list"]:
-            if isinstance(w, dict) and "products" in w:
-                products.extend(w["products"])
+    st.info("🔄 Procesez datele SmartBill...")
     
+    products = []
+    
+    # Verificăm structura răspunsului
+    if isinstance(data, dict):
+        if "list" in data:
+            for warehouse in data["list"]:
+                if isinstance(warehouse, dict) and "products" in warehouse:
+                    warehouse_name = warehouse.get("name", "Necunoscut")
+                    product_count = len(warehouse["products"])
+                    st.info(f"📦 Depozit: {warehouse_name} - {product_count} produse")
+                    products.extend(warehouse["products"])
+        elif "products" in data:
+            products = data["products"]
+            st.info(f"📦 Găsite {len(products)} produse direct în răspuns")
+    elif isinstance(data, list):
+        products = data
+        st.info(f"📦 Găsite {len(products)} produse în array")
+    
+    if not products:
+        st.warning("⚠️ Nu am găsit nicio listă de produse în răspunsul SmartBill")
+        st.json(data)  # Afișăm structura pentru debugging
+        return sb_dict
+    
+    # Procesăm produsele
     for p in products:
         if not isinstance(p, dict):
             continue
-        code = p.get('productCode', '').strip() or p.get("code", "").strip()
+        
+        # Încercăm mai multe variante de chei pentru cod produs
+        code = (p.get('productCode') or p.get('code') or p.get('sku') or '').strip()
+        
         if not code:
             continue
+        
+        # Preluăm numele și stocul
+        name = p.get('productName') or p.get('name') or p.get('description') or code
+        stock = float(p.get('quantity', 0) or 0)
+        
         sb_dict[code] = {
-            'name': p.get('productName', '') or p.get("name", ""),
-            'stock': float(p.get('quantity', 0))
+            'name': name,
+            'stock': stock
         }
+    
+    if sb_dict:
+        st.success(f"✅ Procesate cu succes {len(sb_dict)} produse SmartBill")
+    else:
+        st.error("❌ Nu s-a putut procesa niciun produs din răspunsul SmartBill")
+    
     return sb_dict
 
 def get_smartbill_decisions():
@@ -593,41 +652,90 @@ def save_smartbill_decision(sku, action, name=None, product_id=None):
         if conn: conn.close()
 
 def parse_smartbill_xlsx(uploaded_file):
+    """Parsează fișier Excel cu prețuri intrare - suportă .xlsx și .xls"""
+    status = st.empty()
+    
     try:
-        df = pd.read_excel(uploaded_file, sheet_name=0)
+        status.info("📂 Citesc fișierul Excel...")
+        
+        # Încercăm mai întâi cu openpyxl (pentru .xlsx)
+        try:
+            df = pd.read_excel(uploaded_file, sheet_name=0, engine='openpyxl')
+            status.success("✅ Fișier .xlsx citit cu openpyxl")
+        except Exception as e1:
+            # Dacă nu merge, încercăm cu xlrd (pentru .xls vechi)
+            try:
+                uploaded_file.seek(0)  # Reset file pointer
+                df = pd.read_excel(uploaded_file, sheet_name=0, engine='xlrd')
+                status.success("✅ Fișier .xls citit cu xlrd")
+            except Exception as e2:
+                status.error(f"❌ Nu pot citi fișierul Excel:")
+                status.error(f"  • Eroare openpyxl (.xlsx): {e1}")
+                status.error(f"  • Eroare xlrd (.xls): {e2}")
+                status.warning("💡 Încercați să salvați fișierul ca .xlsx modern")
+                return None
+        
+        status.info("🔍 Caut antetul coloanelor...")
+        
+        # Găsim rândul cu antetul
         header_row = None
         for idx, row in df.iterrows():
-            if 'Cod produs' in str(row.values) or 'productCode' in str(row.values):
+            row_str = ' '.join(str(v).lower() for v in row.values)
+            if 'cod' in row_str and ('produs' in row_str or 'sku' in row_str):
                 header_row = idx
+                status.success(f"✅ Antet găsit la rândul {idx + 1}")
                 break
         
         if header_row is None:
-            st.error("Nu am găsit antetul coloanelor")
+            status.error("❌ Nu am găsit antetul coloanelor în Excel")
+            status.warning("💡 Caut rând care conține 'Cod produs' sau 'SKU'")
             return None
         
-        df = pd.read_excel(uploaded_file, sheet_name=0, header=header_row)
+        # Re-citim cu header-ul corect
+        uploaded_file.seek(0)
+        try:
+            df = pd.read_excel(uploaded_file, sheet_name=0, header=header_row, engine='openpyxl')
+        except:
+            uploaded_file.seek(0)
+            df = pd.read_excel(uploaded_file, sheet_name=0, header=header_row, engine='xlrd')
+        
         df.columns = df.columns.str.strip()
         
+        status.info(f"📋 Coloane găsite: {', '.join(df.columns[:10])}")
+        
+        # Mapăm coloanele
         col_map = {}
         for col in df.columns:
             cl = col.lower()
-            if 'cod' in cl and 'produs' in cl: col_map['sku'] = col
-            elif 'cantitate' in cl or 'stoc' in cl: col_map['cantitate'] = col
-            elif 'pret' in cl and 'unitar' in cl: col_map['pret_unitar'] = col
-            elif 'data' in cl: col_map['data'] = col
+            if 'cod' in cl and ('produs' in cl or 'sku' in cl):
+                col_map['sku'] = col
+            elif 'cantitate' in cl or 'cant' in cl or 'qty' in cl:
+                col_map['cantitate'] = col
+            elif 'pret' in cl and ('unitar' in cl or 'unit' in cl):
+                col_map['pret_unitar'] = col
+            elif 'data' in cl or 'date' in cl:
+                col_map['data'] = col
         
         if 'sku' not in col_map:
-            st.error("Nu am găsit coloana COD PRODUS")
+            status.error("❌ Nu am găsit coloana pentru COD PRODUS/SKU")
+            status.info(f"📋 Coloane disponibile: {list(df.columns)}")
             return None
         
+        status.success(f"✅ Mapare coloane: {col_map}")
+        
+        # Extragem datele
         entries = []
-        for _, row in df.iterrows():
+        skipped = 0
+        
+        for idx, row in df.iterrows():
             try:
                 sku = str(row[col_map['sku']]).strip()
-                if not sku or sku == 'nan' or sku == '': continue
+                if not sku or sku == 'nan' or sku == '' or sku.lower() == 'none':
+                    skipped += 1
+                    continue
                 
-                cantitate = safe_decimal(row.get(col_map.get('cantitate'), 0))
-                pret_unitar = safe_decimal(row.get(col_map.get('pret_unitar'), 0))
+                cantitate = safe_decimal(row.get(col_map.get('cantitate', ''), 0))
+                pret_unitar = safe_decimal(row.get(col_map.get('pret_unitar', ''), 0))
                 data_doc = row.get(col_map.get('data')) if 'data' in col_map else datetime.now().date()
                 
                 if cantitate > 0 and pret_unitar > 0:
@@ -637,12 +745,28 @@ def parse_smartbill_xlsx(uploaded_file):
                         'pret_unitar': pret_unitar,
                         'data_document': data_doc
                     })
-            except:
+            except Exception as row_err:
+                skipped += 1
                 continue
         
+        status.empty()
+        
+        if entries:
+            st.success(f"✅ Procesate {len(entries)} rânduri valide (sărite: {skipped})")
+            
+            # Afișăm un preview
+            with st.expander("👁️ Preview primele 5 rânduri", expanded=False):
+                preview_df = pd.DataFrame(entries[:5])
+                st.dataframe(preview_df)
+        else:
+            st.error("❌ Nu am găsit niciun rând valid cu cantitate > 0 și preț > 0")
+        
         return entries
+        
     except Exception as e:
-        st.error(f"Eroare parsare XLSX: {e}")
+        status.error(f"❌ Eroare parsare XLSX: {type(e).__name__}: {e}")
+        import traceback
+        st.error(traceback.format_exc())
         return None
 
 def sync_smartbill_data():
@@ -650,38 +774,55 @@ def sync_smartbill_data():
     
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("📊 Fetch stocuri API", use_container_width=True, type="primary"):
-            with st.spinner("Se preiau datele..."):
-                data = get_smartbill_stocks(config['email'], config['token'], config['cif'])
-                if data:
-                    st.session_state.smartbill_data = process_smartbill_data(data)
+        if st.button("📊 Preia stocuri SmartBill", use_container_width=True, type="primary"):
+            data = get_smartbill_stocks(config['email'], config['token'], config['cif'])
+            if data:
+                processed = process_smartbill_data(data)
+                if processed:
+                    st.session_state.smartbill_data = processed
                     st.session_state.smartbill_page = 1
-                    st.success(f"✅ {len(st.session_state.smartbill_data)} produse")
+                    
+                    # Statistici detaliate
+                    total_stock = sum(p['stock'] for p in processed.values())
+                    st.info(f"📊 **Rezumat:**")
+                    st.info(f"  • Produse: {len(processed)}")
+                    st.info(f"  • Stoc total: {total_stock:.2f}")
     
     with col2:
         uploaded_file = st.file_uploader("📄 Upload XLSX prețuri intrare", type=['xls', 'xlsx'], key="xlsx_upload")
         if uploaded_file and st.button("💾 Procesează XLSX", use_container_width=True):
-            with st.spinner("Procesez..."):
-                entries = parse_smartbill_xlsx(uploaded_file)
-                if entries:
-                    try:
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
-                        cursor.execute("SELECT sku, product_id FROM product_sku")
-                        sku_map = {r[0]: r[1] for r in cursor.fetchall()}
+            entries = parse_smartbill_xlsx(uploaded_file)
+            if entries:
+                try:
+                    conn = get_db_connection()
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT sku, product_id FROM product_sku")
+                    sku_map = {r[0]: r[1] for r in cursor.fetchall()}
+                    
+                    to_insert = [(sku_map[e['sku']], e['sku'], e['data_document'], e['cantitate'], e['pret_unitar']) 
+                                 for e in entries if e['sku'] in sku_map]
+                    
+                    not_found = [e['sku'] for e in entries if e['sku'] not in sku_map]
+                    
+                    if to_insert:
+                        cursor.execute("DELETE FROM smartbill_pret_intrare")
+                        execute_batch(cursor, 
+                            "INSERT INTO smartbill_pret_intrare (product_id, sku, data_document, cantitate, pret_unitar) VALUES (%s, %s, %s, %s, %s)", 
+                            to_insert, page_size=500)
+                        conn.commit()
                         
-                        to_insert = [(sku_map[e['sku']], e['sku'], e['data_document'], e['cantitate'], e['pret_unitar']) for e in entries if e['sku'] in sku_map]
-                        
-                        if to_insert:
-                            cursor.execute("DELETE FROM smartbill_pret_intrare")
-                            execute_batch(cursor, "INSERT INTO smartbill_pret_intrare (product_id, sku, data_document, cantitate, pret_unitar) VALUES (%s, %s, %s, %s, %s)", to_insert, page_size=500)
-                            conn.commit()
-                            st.success(f"✅ Salvate {len(to_insert)} prețuri intrare")
-                        
-                        cursor.close()
-                        conn.close()
-                    except Exception as e:
-                        st.error(f"Eroare: {e}")
+                        st.success(f"✅ Salvate {len(to_insert)} prețuri intrare în baza de date")
+                        st.balloons()
+                    
+                    if not_found:
+                        st.warning(f"⚠️ {len(not_found)} SKU-uri nu au fost găsite în baza de date:")
+                        with st.expander("Vezi SKU-uri negăsite"):
+                            st.write(not_found[:20])
+                    
+                    cursor.close()
+                    conn.close()
+                except Exception as e:
+                    st.error(f"❌ Eroare salvare în DB: {e}")
     
     if not st.session_state.get("smartbill_data"):
         return
@@ -737,6 +878,7 @@ def sync_smartbill_data():
                     st.selectbox("Selectează produs", [""] + list(product_options.keys()), key=f"prod_{item['sku']}")
         
         if st.button("💾 Salvează deciziile paginii", use_container_width=True):
+            saved_count = 0
             for item in page_items:
                 action = st.session_state.get(f"act_{item['sku']}", "Alege...")
                 if action in action_map:
@@ -745,14 +887,17 @@ def sync_smartbill_data():
                     if code == "asociaza_la_sku":
                         sel = st.session_state.get(f"prod_{item['sku']}")
                         if sel: pid = product_options[sel]
-                    save_smartbill_decision(item['sku'], code, item['name'], pid)
-            st.success("✅ Salvat")
+                    if save_smartbill_decision(item['sku'], code, item['name'], pid):
+                        saved_count += 1
+            
+            st.success(f"✅ Salvate {saved_count} decizii")
             time.sleep(0.5)
             st.rerun()
     
     if not unmatched and stock_data:
-        st.success("✅ Toate SKU-urile mapate!")
-        if st.button("💾 Salvează stocuri în DB", type="primary", use_container_width=True):
+        st.success(f"✅ Toate {len(stock_data)} SKU-urile sunt mapate corect!")
+        
+        if st.button("💾 Salvează stocuri în baza de date", type="primary", use_container_width=True):
             try:
                 conn = get_db_connection()
                 cursor = conn.cursor()
@@ -761,13 +906,14 @@ def sync_smartbill_data():
                 conn.commit()
                 cursor.close()
                 conn.close()
-                st.success("✅ Stocuri salvate!")
+                
+                st.success(f"✅ {len(stock_data)} stocuri salvate în baza de date!")
                 st.session_state.smartbill_data = None
                 st.balloons()
                 time.sleep(1)
                 st.rerun()
             except Exception as e:
-                st.error(f"Eroare: {e}")
+                st.error(f"❌ Eroare salvare: {e}")
 
 # =========================
 # UI PRINCIPAL

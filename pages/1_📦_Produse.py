@@ -63,6 +63,8 @@ if "smartbill_data" not in st.session_state:
     st.session_state["smartbill_data"] = None
 if "smartbill_page" not in st.session_state:
     st.session_state["smartbill_page"] = 1
+if "smartbill_selections" not in st.session_state:
+    st.session_state["smartbill_selections"] = {}
 
 # =========================
 # HELPER FUNCTIONS
@@ -554,34 +556,59 @@ def get_smartbill_decisions():
         st.error(f"Eroare citire decizii SmartBill: {e}")
         return {}
 
-def save_smartbill_decision(sku, action, name=None):
+def save_smartbill_decisions_batch(decisions_list):
+    """Salvează un batch de decizii SmartBill"""
     conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        if action == "creaza_nou":
-            new_product_id = str(uuid.uuid4())
-            cursor.execute("INSERT INTO product (id, name) VALUES (%s, %s)", (new_product_id, name or sku))
-            cursor.execute("INSERT INTO product_sku (sku, product_id, is_primary) VALUES (%s, %s, true)", (sku, new_product_id))
-            cursor.execute("""
-                INSERT INTO smartbill_sku_mapping_decisions (smartbill_sku, product_id, decision_type, decided_at)
-                VALUES (%s, %s, %s, NOW())
-                ON CONFLICT (smartbill_sku) DO UPDATE SET product_id = EXCLUDED.product_id, decision_type = EXCLUDED.decision_type, decided_at = NOW()
-            """, (sku, new_product_id, action))
-        else:
-            cursor.execute("""
-                INSERT INTO smartbill_sku_mapping_decisions (smartbill_sku, product_id, decision_type, decided_at)
-                VALUES (%s, NULL, %s, NOW())
-                ON CONFLICT (smartbill_sku) DO UPDATE SET decision_type = EXCLUDED.decision_type, decided_at = NOW()
-            """, (sku, action))
+        
+        saved_count = 0
+        for decision in decisions_list:
+            sku = decision['sku']
+            action = decision['action']
+            name = decision.get('name')
+            product_id = decision.get('product_id')
+            
+            if action == "creaza_nou":
+                new_product_id = str(uuid.uuid4())
+                cursor.execute("INSERT INTO product (id, name) VALUES (%s, %s)", (new_product_id, name or sku))
+                cursor.execute("INSERT INTO product_sku (sku, product_id, is_primary) VALUES (%s, %s, true)", (sku, new_product_id))
+                cursor.execute("""
+                    INSERT INTO smartbill_sku_mapping_decisions (smartbill_sku, product_id, decision_type, decided_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (smartbill_sku) DO UPDATE SET product_id = EXCLUDED.product_id, decision_type = EXCLUDED.decision_type, decided_at = NOW()
+                """, (sku, new_product_id, action))
+                saved_count += 1
+            elif action == "mapeaza" and product_id:
+                # Asociem SKU-ul SmartBill la produsul existent
+                cursor.execute("""
+                    INSERT INTO product_sku (sku, product_id, is_primary) 
+                    VALUES (%s, %s, false) 
+                    ON CONFLICT (sku) DO UPDATE SET product_id = EXCLUDED.product_id
+                """, (sku, product_id))
+                cursor.execute("""
+                    INSERT INTO smartbill_sku_mapping_decisions (smartbill_sku, product_id, decision_type, decided_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (smartbill_sku) DO UPDATE SET product_id = EXCLUDED.product_id, decision_type = EXCLUDED.decision_type, decided_at = NOW()
+                """, (sku, product_id, action))
+                saved_count += 1
+            elif action == "ignora":
+                cursor.execute("""
+                    INSERT INTO smartbill_sku_mapping_decisions (smartbill_sku, product_id, decision_type, decided_at)
+                    VALUES (%s, NULL, %s, NOW())
+                    ON CONFLICT (smartbill_sku) DO UPDATE SET decision_type = EXCLUDED.decision_type, decided_at = NOW()
+                """, (sku, action))
+                saved_count += 1
+        
         conn.commit()
         cursor.close()
         conn.close()
-        return True
+        return saved_count
     except Exception as e:
         if conn: conn.rollback()
-        st.error(f"❌ Eroare salvare decizie: {e}")
-        return False
+        st.error(f"❌ Eroare salvare decizii: {e}")
+        return 0
     finally:
         if conn: conn.close()
 
@@ -695,6 +722,7 @@ def sync_smartbill_data():
                 data = get_smartbill_stocks(config['email'], config['token'], config['cif'])
                 if data:
                     st.session_state.smartbill_data = process_smartbill_data(data)
+                    st.session_state.smartbill_selections = {}  # Reset selections
                     if st.session_state.smartbill_data:
                         total_stock = sum(p['stock'] for p in st.session_state.smartbill_data.values())
                         st.success(f"✅ {len(st.session_state.smartbill_data)} produse (stoc total: {total_stock:.0f})")
@@ -747,11 +775,18 @@ def sync_smartbill_data():
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT sku, product_id FROM product_sku")
+        cursor.execute("SELECT sku, product_id FROM product_sku WHERE is_primary = true")
         sku_to_product = {row[0]: row[1] for row in cursor.fetchall()}
+        
+        # Preluăm toate produsele pentru dropdown-ul de mapare
+        cursor.execute("SELECT p.id, p.name, ps.sku FROM product p JOIN product_sku ps ON p.id = ps.product_id WHERE ps.is_primary = true ORDER BY p.name")
+        all_products = cursor.fetchall()
+        product_options = {f"{row[1]} ({row[2]})": row[0] for row in all_products}
+        
         cursor.close()
         conn.close()
-    except:
+    except Exception as e:
+        st.error(f"Eroare citire produse: {e}")
         return
 
     stock_data = []
@@ -767,8 +802,8 @@ def sync_smartbill_data():
             continue
         elif dec == "creaza_nou" and dec_info.get("product_id"):
             stock_data.append((dec_info["product_id"], sku, Decimal(info['stock'])))
-        elif dec == "asteapta":
-            continue
+        elif dec == "mapeaza" and dec_info.get("product_id"):
+            stock_data.append((dec_info["product_id"], sku, Decimal(info['stock'])))
         else:
             unmatched.append({'sku': sku, 'name': info['name'], 'stock': info['stock']})
     
@@ -781,18 +816,75 @@ def sync_smartbill_data():
         
         with st.expander("📋 SKU-uri necunoscute", expanded=True):
             for item in unmatched[start_idx:start_idx+page_size]:
-                c1, c2, c3, c4, c5 = st.columns([2, 3, 2, 2, 1])
-                c1.write(item['sku'])
+                c1, c2, c3, c4 = st.columns([2, 3, 1, 3])
+                c1.write(f"**{item['sku']}**")
                 c2.write(item['name'])
                 c3.write(item['stock'])
-                action = c4.selectbox("Acțiune", ["Alege...", "Creează nou", "Ignoră", "Așteaptă"], key=f"act_{item['sku']}", label_visibility="collapsed")
-                if c5.button("💾", key=f"btn_{item['sku']}"):
-                    if action != "Alege...":
-                        act_map = {"Creează nou": "creaza_nou", "Ignoră": "ignora", "Așteaptă": "asteapta"}
-                        if save_smartbill_decision(item['sku'], act_map[action], item['name']):
-                            st.success(f"Salvat {action}")
-                            time.sleep(0.5)
-                            st.rerun()
+                
+                # Dropdown pentru acțiune (nu salvează direct)
+                action = c4.selectbox(
+                    "Acțiune", 
+                    ["Alege...", "Creează nou", "Mapeaza", "Ignoră"], 
+                    key=f"act_{item['sku']}", 
+                    label_visibility="collapsed"
+                )
+                
+                # Salvăm selecția în session_state
+                if action != "Alege...":
+                    if item['sku'] not in st.session_state.smartbill_selections:
+                        st.session_state.smartbill_selections[item['sku']] = {}
+                    st.session_state.smartbill_selections[item['sku']]['action'] = action
+                    st.session_state.smartbill_selections[item['sku']]['name'] = item['name']
+                
+                # Dacă a ales "Mapeaza", afișăm dropdown pentru selectare produs
+                if action == "Mapeaza":
+                    selected_product = st.selectbox(
+                        "Selectează produs existent",
+                        [""] + list(product_options.keys()),
+                        key=f"prod_{item['sku']}"
+                    )
+                    if selected_product:
+                        st.session_state.smartbill_selections[item['sku']]['product_id'] = product_options[selected_product]
+        
+        # BUTON UNIC LA FINAL PENTRU SALVARE
+        if st.button("💾 Salvează opțiunile selectate", type="primary", use_container_width=True):
+            decisions_to_save = []
+            
+            for sku, selection in st.session_state.smartbill_selections.items():
+                action = selection.get('action')
+                if not action:
+                    continue
+                
+                action_map = {"Creează nou": "creaza_nou", "Mapeaza": "mapeaza", "Ignoră": "ignora"}
+                mapped_action = action_map.get(action)
+                
+                if mapped_action:
+                    decision = {
+                        'sku': sku,
+                        'action': mapped_action,
+                        'name': selection.get('name')
+                    }
+                    
+                    # Dacă e mapare, adăugăm product_id
+                    if mapped_action == "mapeaza":
+                        product_id = selection.get('product_id')
+                        if product_id:
+                            decision['product_id'] = product_id
+                        else:
+                            st.warning(f"⚠️ SKU {sku}: Nu ați selectat un produs pentru mapare")
+                            continue
+                    
+                    decisions_to_save.append(decision)
+            
+            if decisions_to_save:
+                saved_count = save_smartbill_decisions_batch(decisions_to_save)
+                if saved_count > 0:
+                    st.success(f"✅ Salvate {saved_count} decizii")
+                    st.session_state.smartbill_selections = {}  # Reset selections
+                    time.sleep(1)
+                    st.rerun()
+            else:
+                st.warning("⚠️ Nicio selecție validă de salvat")
     
     if stock_data:
         st.info(f"📦 {len(stock_data)} produse match")

@@ -893,6 +893,11 @@ def sync_smartbill_data():
                 conn = get_db_connection()
                 cursor = conn.cursor()
                 cursor.execute("DELETE FROM smartbill_stoc")
+                from collections import defaultdict
+                product_stoc = defaultdict(Decimal)
+                for pid, sku, stoc in stock_data:
+                    product_stoc[pid] += Decimal(stoc)
+                stock_data_agg = [(pid, suma) for pid, suma in product_stoc.items()]
                 execute_batch(cursor, "INSERT INTO smartbill_stoc (product_id, sku, stock_quantity) VALUES (%s, %s, %s)", stock_data, page_size=500)
                 conn.commit()
                 cursor.close()

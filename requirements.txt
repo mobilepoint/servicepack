@@ -3,3 +3,6 @@ supabase
 woocommerce
 python-dotenv
 psycopg2-binary
+pandas
+openpyxl
+requests

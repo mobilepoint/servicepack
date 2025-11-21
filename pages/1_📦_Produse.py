@@ -615,19 +615,67 @@ def save_smartbill_decisions_batch(decisions_list):
 def parse_smartbill_xlsx(uploaded_file):
     import pandas as pd
     try:
-        # Se citește tot sheet-ul, fără antet
         df = pd.read_excel(uploaded_file, sheet_name=0, header=None)
-        
-        # Detectează rândul ce conține efectiv antetul (căutăm "Cod" și "Cantitati")
+
+        # Găsește rândul cu antetul real, robust la spații
         header_row = None
         for idx, row in df.iterrows():
-            row_lower = [str(cell).strip().lower() for cell in row.values]
-            if "cod" in row_lower and "cantitati" in row_lower:
+            row_str = [str(cell).strip().lower() for cell in row.values]
+            if any(cell.startswith("cod") for cell in row_str) and any(cell.startswith("cantit") for cell in row_str):
                 header_row = idx
                 break
         if header_row is None:
-            st.error("Nu am găsit antetul de coloană ('Cod', 'Cantitati' etc) în Excel.")
+            st.error("Nu am găsit antetul de coloană (ex: 'Cod', 'Cantitati' etc.) în Excel.")
             return None
+
+        uploaded_file.seek(0)
+        df = pd.read_excel(uploaded_file, sheet_name=0, header=header_row)
+        df.columns = df.columns.str.strip()
+
+        col_map = {}
+        for col in df.columns:
+            cl = col.strip().lower()
+            if cl.startswith("cod"):
+                col_map['sku'] = col
+            elif cl.startswith("cantit"):
+                col_map['cantitate'] = col
+            elif cl.startswith("valo"):
+                col_map['pret_unitar'] = col
+        if 'sku' not in col_map:
+            st.error("❌ Nu am găsit coloana 'Cod' (SKU)")
+            st.info(f"Coloane detectate: {list(df.columns)}")
+            return None
+
+        entries = []
+        skipped = 0
+        for idx, row in df.iterrows():
+            try:
+                sku = str(row[col_map['sku']]).strip()
+                if not sku or sku == 'nan' or sku == '' or sku.lower() == 'none':
+                    skipped += 1
+                    continue
+                cantitate = safe_decimal(row.get(col_map.get('cantitate', ''), 0))
+                pret_unitar = safe_decimal(row.get(col_map.get('pret_unitar', ''), 0))
+                data_doc = datetime.now().date()
+                if cantitate > 0:
+                    entries.append({
+                        'sku': sku,
+                        'cantitate': cantitate,
+                        'pret_unitar': pret_unitar,
+                        'data_document': data_doc
+                    })
+            except Exception as row_err:
+                skipped += 1
+                continue
+        if entries:
+            st.success(f"✅ Procesate {len(entries)} rânduri (sărite: {skipped})")
+        else:
+            st.error("❌ Niciun rând valid găsit")
+        return entries
+    except Exception as e:
+        st.error(f"❌ Eroare citire XLS: {e}")
+        return None
+
         
         # Recitește fișierul cu acel header
         uploaded_file.seek(0)

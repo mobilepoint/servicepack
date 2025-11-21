@@ -17,8 +17,9 @@ st.set_page_config(page_title="Produse WooCommerce & SmartBill", layout="wide")
 st.title("📦 Import Produse")
 
 # =========================
-#   CONNECTIONS
+# CONNECTIONS
 # =========================
+
 @st.cache_resource
 def get_pg_connection_string():
     return st.secrets["connections"]["postgresql"]["url"]
@@ -49,8 +50,9 @@ def init_smartbill():
 wcapi = init_woocommerce()
 
 # =========================
-#   SESSION STATE
+# SESSION STATE
 # =========================
+
 if "import_session_id" not in st.session_state:
     st.session_state["import_session_id"] = None
 if "import_phase" not in st.session_state:
@@ -63,8 +65,9 @@ if "smartbill_page" not in st.session_state:
     st.session_state["smartbill_page"] = 1
 
 # =========================
-#   HELPER FUNCTIONS
+# HELPER FUNCTIONS
 # =========================
+
 def get_db_connection():
     return psycopg2.connect(get_pg_connection_string())
 
@@ -130,11 +133,13 @@ def get_latest_session_id():
         return None
 
 # =========================
-#   WOOCOMMERCE FUNCTIONS
+# WOOCOMMERCE FUNCTIONS
 # =========================
+
 def quick_refresh_prices_and_stock():
     with st.container():
         st.markdown("### ⚡ Quick Refresh WooCommerce")
+        
         try:
             conn = get_db_connection()
             cursor = conn.cursor(cursor_factory=RealDictCursor)
@@ -142,9 +147,11 @@ def quick_refresh_prices_and_stock():
             known_skus = cursor.fetchall()
             cursor.close()
             conn.close()
+            
             if not known_skus:
                 st.warning("Nu am găsit SKU-uri!")
                 return
+            
             st.success(f"✅ {len(known_skus)} SKU-uri")
             sku_to_product = {row['sku']: row['product_id'] for row in known_skus}
         except Exception as e:
@@ -158,10 +165,12 @@ def quick_refresh_prices_and_stock():
             if response.status_code != 200:
                 st.error(f"Eroare API: {response.status_code}")
                 return
+            
             data = response.json()
             if not data.get('success'):
                 st.error(f"Export eșuat: {data.get('message')}")
                 return
+            
             woo_products = data.get('products', [])
             st.success(f"✅ {len(woo_products)} produse în {time.time() - start_time:.2f}s")
         except Exception as e:
@@ -173,20 +182,23 @@ def quick_refresh_prices_and_stock():
         stock_data = []
         attributes_data = []
         matched_count = 0
-        progress_bar = st.progress(0)
         
+        progress_bar = st.progress(0)
         for idx, woo_product in enumerate(woo_products):
             progress_bar.progress((idx + 1) / len(woo_products))
             try:
                 sku = woo_product.get('sku', '').strip()
                 if not sku or sku not in sku_to_product:
                     continue
+                
                 product_id = sku_to_product[sku]
                 matched_count += 1
+                
                 product_type = woo_product.get('product_type', 'simple')
                 woo_product_id = woo_product.get('woo_product_id')
                 woo_variation_id = woo_product.get('woo_variation_id')
                 parent_id = woo_product.get('parent_id')
+                
                 regular_price = safe_decimal(woo_product.get('regular_price'), 0)
                 sale_price_raw = woo_product.get('sale_price')
                 sale_price = safe_decimal(sale_price_raw) if sale_price_raw else None
@@ -198,12 +210,14 @@ def quick_refresh_prices_and_stock():
                     woo_variation_id if product_type == 'variation' else None,
                     regular_price, sale_price
                 ))
+                
                 stock_data.append((
                     product_id, sku,
                     parent_id if product_type == 'variation' else woo_product_id,
                     woo_variation_id if product_type == 'variation' else None,
                     stock_qty
                 ))
+                
                 if product_type == 'variation' and woo_product.get('attributes'):
                     for attr in woo_product.get('attributes', []):
                         attr_name = attr.get('name', '')
@@ -215,6 +229,7 @@ def quick_refresh_prices_and_stock():
                             ))
             except:
                 pass
+        
         progress_bar.empty()
         
         if prices_data or stock_data:
@@ -222,38 +237,40 @@ def quick_refresh_prices_and_stock():
             try:
                 conn = get_db_connection()
                 cursor = conn.cursor()
+                
+                # ȘTERGEM DATELE VECHI ÎNAINTE DE A INSERA DATELE NOI
+                cursor.execute("DELETE FROM woo_preturi")
+                cursor.execute("DELETE FROM woo_stoc")
+                cursor.execute("DELETE FROM woo_variation_attributes")
+                
                 if prices_data:
                     execute_batch(cursor, """
-                        INSERT INTO woo_preturi 
+                        INSERT INTO woo_preturi
                         (product_id, sku, woo_product_id, woo_variation_id, regular_price, sale_price)
                         VALUES (%s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (woo_product_id, woo_variation_id) DO UPDATE
-                        SET product_id = EXCLUDED.product_id, sku = EXCLUDED.sku,
-                            regular_price = EXCLUDED.regular_price, sale_price = EXCLUDED.sale_price,
-                            last_sync = NOW()
                     """, prices_data, page_size=500)
+                
                 if stock_data:
                     execute_batch(cursor, """
-                        INSERT INTO woo_stoc 
+                        INSERT INTO woo_stoc
                         (product_id, sku, woo_product_id, woo_variation_id, stock_quantity)
                         VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (woo_product_id, woo_variation_id) DO UPDATE
-                        SET product_id = EXCLUDED.product_id, sku = EXCLUDED.sku,
-                            stock_quantity = EXCLUDED.stock_quantity, last_sync = NOW()
                     """, stock_data, page_size=500)
+                
                 if attributes_data:
                     execute_batch(cursor, """
-                        INSERT INTO woo_variation_attributes 
+                        INSERT INTO woo_variation_attributes
                         (product_id, woo_product_id, woo_variation_id, attribute_name, attribute_value)
                         VALUES (%s, %s, %s, %s, %s)
-                        ON CONFLICT (woo_product_id, woo_variation_id, attribute_name) DO UPDATE
-                        SET product_id = EXCLUDED.product_id, attribute_value = EXCLUDED.attribute_value
                     """, attributes_data, page_size=500)
+                
                 conn.commit()
                 cursor.close()
                 conn.close()
+                
                 st.success(f"✅ Complet!")
                 st.balloons()
+                
                 c1, c2, c3 = st.columns(3)
                 c1.metric("💰 Prețuri", len(prices_data))
                 c2.metric("📦 Stocuri", len(stock_data))
@@ -267,27 +284,35 @@ def fetch_and_stage_products_bulk(session_id: str):
     stats = {'total_products_fetched': 0, 'simple_products': 0, 'variations_inserted': 0, 'errors': 0, 'duration': 0}
     progress_bar = st.progress(0)
     status_text = st.empty()
+    
     try:
         status_text.info("🚀 Fetch BULK...")
         start_time = time.time()
+        
         response = wcapi.get("products/export-full")
         if response.status_code != 200:
             st.error(f"❌ Eroare API: {response.status_code}")
             return stats
+        
         data = response.json()
         if not data.get('success'):
             st.error(f"❌ Export eșuat: {data.get('message')}")
             return stats
+        
         woo_products = data.get('products', [])
         stats['total_products_fetched'] = len(woo_products)
         status_text.success(f"✅ {len(woo_products)} produse în {time.time() - start_time:.2f}s!")
+        
         if not woo_products:
             return stats
+        
         status_text.info("💾 Scriu în staging...")
         conn = get_db_connection()
         cursor = conn.cursor()
+        
         total_items = len(woo_products)
         processed = 0
+        
         for product in woo_products:
             processed += 1
             progress_bar.progress(processed / total_items)
@@ -297,10 +322,12 @@ def fetch_and_stage_products_bulk(session_id: str):
                 woo_variation_id = product.get('woo_variation_id')
                 name = product.get('name', 'Produs fără nume')
                 sku = product.get('sku', '').strip()
+                
                 regular_price = safe_decimal(product.get('regular_price'), 0)
                 sale_price_raw = product.get('sale_price')
                 sale_price = safe_decimal(sale_price_raw) if sale_price_raw else None
                 stock_qty = safe_int(product.get('stock_quantity'), 0)
+                
                 if product_type == 'variation':
                     parent_name = product.get('parent_name', '')
                     attributes = product.get('attributes', [])
@@ -309,10 +336,12 @@ def fetch_and_stage_products_bulk(session_id: str):
                 else:
                     full_name = name
                     stats['simple_products'] += 1
+                
                 parent_id_for_conflict = product.get('parent_id') if product_type == 'variation' else woo_product_id
+                
                 cursor.execute("""
-                    INSERT INTO woo_staging_raw 
-                    (import_session_id, woo_product_id, woo_variation_id, product_type, 
+                    INSERT INTO woo_staging_raw
+                    (import_session_id, woo_product_id, woo_variation_id, product_type,
                      parent_name, sku, regular_price, sale_price, stock_quantity, attributes, raw_data)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb)
                     ON CONFLICT (import_session_id, woo_product_id, woo_variation_id) DO UPDATE
@@ -322,65 +351,81 @@ def fetch_and_stage_products_bulk(session_id: str):
                 """, (session_id, parent_id_for_conflict, woo_variation_id, product_type,
                       full_name, sku if sku else None, regular_price, sale_price, stock_qty,
                       json.dumps(product.get('attributes', [])), json.dumps(product)))
+                
                 if processed % 100 == 0:
                     conn.commit()
                     status_text.info(f"💾 {processed}/{total_items}...")
             except:
                 stats['errors'] += 1
+        
         conn.commit()
         cursor.close()
         conn.close()
+        
         stats['duration'] = time.time() - start_time
         progress_bar.empty()
         status_text.success(f"✅ Extract: {stats['variations_inserted'] + stats['simple_products']} în {stats['duration']:.2f}s")
     except Exception as e:
         st.error(f"❌ Eroare FAZA 1: {e}")
         stats['errors'] += 1
+    
     return stats
 
 def run_sku_matching_and_autocreate(session_id: str):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        
         st.info("🔍 Matching SKU...")
         cursor.execute("SELECT * FROM match_skus_for_session(%s)", (session_id,))
         matches = cursor.fetchall()
+        
         if not matches:
             st.warning("⚠️ Nu am găsit match-uri!")
             cursor.close()
             conn.close()
             return {}
+        
         match_data = []
         created_products = 0
+        
         for match in matches:
             staging_raw_id, sku, product_id, match_type, requires_action = match
+            
             if match_type == 'unknown' and sku:
                 cursor.execute("SELECT parent_name FROM woo_staging_raw WHERE id = %s", (staging_raw_id,))
                 result = cursor.fetchone()
                 product_name = result[0] if result else f"Produs {sku}"
+                
                 new_product_id = str(uuid.uuid4())
                 cursor.execute("INSERT INTO product (id, name) VALUES (%s, %s)", (new_product_id, product_name))
                 cursor.execute("INSERT INTO product_sku (sku, product_id, is_primary) VALUES (%s, %s, true)", (sku, new_product_id))
+                
                 product_id = new_product_id
                 match_type = 'auto_created'
                 requires_action = False
                 created_products += 1
+            
             match_data.append((session_id, staging_raw_id, sku, product_id, match_type, requires_action))
+        
         if match_data:
             execute_batch(cursor, """
-                INSERT INTO woo_staging_matched 
+                INSERT INTO woo_staging_matched
                 (import_session_id, staging_raw_id, sku, product_id, match_type, requires_action)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 ON CONFLICT (import_session_id, staging_raw_id) DO UPDATE
                 SET sku = EXCLUDED.sku, product_id = EXCLUDED.product_id,
                     match_type = EXCLUDED.match_type, requires_action = EXCLUDED.requires_action
             """, match_data, page_size=1000)
-            conn.commit()
-            st.success(f"✅ Inserate {len(match_data)} match-uri | 🆕 Creeat {created_products} produse")
+        
+        conn.commit()
+        st.success(f"✅ Inserate {len(match_data)} match-uri | 🆕 Creeat {created_products} produse")
+        
         cursor.execute("SELECT * FROM v_import_status WHERE import_session_id = %s", (session_id,))
         stats = cursor.fetchone()
         cursor.close()
         conn.close()
+        
         if stats:
             return {
                 'total': stats[1], 'matched_primary': stats[2], 'matched_alias': stats[3],
@@ -429,15 +474,21 @@ def finalize_import(session_id: str):
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
+        
         st.info("📦 Finalizare...")
+        
+        # ȘTERGEM DATELE VECHI ÎNAINTE DE FINALIZARE
         cursor.execute("DELETE FROM woo_variation_attributes")
         cursor.execute("DELETE FROM woo_stoc")
         cursor.execute("DELETE FROM woo_preturi")
+        
         cursor.execute("SELECT * FROM finalize_import(%s)", (session_id,))
         result = cursor.fetchone()
+        
         conn.commit()
         cursor.close()
         conn.close()
+        
         if result:
             return {'prices_inserted': result[0], 'stock_inserted': result[1], 'attributes_inserted': result[2]}
         return {}
@@ -446,8 +497,9 @@ def finalize_import(session_id: str):
         return {}
 
 # =========================
-#   SMARTBILL FUNCTIONS
+# SMARTBILL FUNCTIONS
 # =========================
+
 def get_smartbill_stocks(email, token, cif):
     try:
         r = requests.get(
@@ -470,11 +522,13 @@ def process_smartbill_data(data):
     sb_dict = {}
     if not data:
         return sb_dict
+    
     products = []
     if isinstance(data, dict) and "list" in data:
         for w in data["list"]:
             if isinstance(w, dict) and "products" in w:
                 products.extend(w["products"])
+    
     for p in products:
         if not isinstance(p, dict):
             continue
@@ -506,6 +560,7 @@ def save_smartbill_decision(sku, action, name=None, product_id=None):
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute("DELETE FROM smartbill_sku_mapping_decisions WHERE smartbill_sku = %s", (sku,))
+        
         if action == "creaza_nou":
             new_product_id = str(uuid.uuid4())
             cursor.execute("INSERT INTO product (id, name) VALUES (%s, %s)", (new_product_id, name or sku))
@@ -525,6 +580,7 @@ def save_smartbill_decision(sku, action, name=None, product_id=None):
                 INSERT INTO smartbill_sku_mapping_decisions (smartbill_sku, decision_type, decided_at)
                 VALUES (%s, %s, NOW())
             """, (sku, action))
+        
         conn.commit()
         cursor.close()
         conn.close()
@@ -544,11 +600,14 @@ def parse_smartbill_xlsx(uploaded_file):
             if 'Cod produs' in str(row.values) or 'productCode' in str(row.values):
                 header_row = idx
                 break
+        
         if header_row is None:
             st.error("Nu am găsit antetul coloanelor")
             return None
+        
         df = pd.read_excel(uploaded_file, sheet_name=0, header=header_row)
         df.columns = df.columns.str.strip()
+        
         col_map = {}
         for col in df.columns:
             cl = col.lower()
@@ -556,17 +615,21 @@ def parse_smartbill_xlsx(uploaded_file):
             elif 'cantitate' in cl or 'stoc' in cl: col_map['cantitate'] = col
             elif 'pret' in cl and 'unitar' in cl: col_map['pret_unitar'] = col
             elif 'data' in cl: col_map['data'] = col
+        
         if 'sku' not in col_map:
             st.error("Nu am găsit coloana COD PRODUS")
             return None
+        
         entries = []
         for _, row in df.iterrows():
             try:
                 sku = str(row[col_map['sku']]).strip()
                 if not sku or sku == 'nan' or sku == '': continue
+                
                 cantitate = safe_decimal(row.get(col_map.get('cantitate'), 0))
                 pret_unitar = safe_decimal(row.get(col_map.get('pret_unitar'), 0))
                 data_doc = row.get(col_map.get('data')) if 'data' in col_map else datetime.now().date()
+                
                 if cantitate > 0 and pret_unitar > 0:
                     entries.append({
                         'sku': sku,
@@ -576,6 +639,7 @@ def parse_smartbill_xlsx(uploaded_file):
                     })
             except:
                 continue
+        
         return entries
     except Exception as e:
         st.error(f"Eroare parsare XLSX: {e}")
@@ -583,6 +647,7 @@ def parse_smartbill_xlsx(uploaded_file):
 
 def sync_smartbill_data():
     config = init_smartbill()
+    
     col1, col2 = st.columns(2)
     with col1:
         if st.button("📊 Fetch stocuri API", use_container_width=True, type="primary"):
@@ -592,6 +657,7 @@ def sync_smartbill_data():
                     st.session_state.smartbill_data = process_smartbill_data(data)
                     st.session_state.smartbill_page = 1
                     st.success(f"✅ {len(st.session_state.smartbill_data)} produse")
+    
     with col2:
         uploaded_file = st.file_uploader("📄 Upload XLSX prețuri intrare", type=['xls', 'xlsx'], key="xlsx_upload")
         if uploaded_file and st.button("💾 Procesează XLSX", use_container_width=True):
@@ -603,22 +669,26 @@ def sync_smartbill_data():
                         cursor = conn.cursor()
                         cursor.execute("SELECT sku, product_id FROM product_sku")
                         sku_map = {r[0]: r[1] for r in cursor.fetchall()}
+                        
                         to_insert = [(sku_map[e['sku']], e['sku'], e['data_document'], e['cantitate'], e['pret_unitar']) for e in entries if e['sku'] in sku_map]
+                        
                         if to_insert:
                             cursor.execute("DELETE FROM smartbill_pret_intrare")
                             execute_batch(cursor, "INSERT INTO smartbill_pret_intrare (product_id, sku, data_document, cantitate, pret_unitar) VALUES (%s, %s, %s, %s, %s)", to_insert, page_size=500)
                             conn.commit()
                             st.success(f"✅ Salvate {len(to_insert)} prețuri intrare")
+                        
                         cursor.close()
                         conn.close()
                     except Exception as e:
                         st.error(f"Eroare: {e}")
-
+    
     if not st.session_state.get("smartbill_data"):
         return
     
     sb_products = st.session_state.smartbill_data
     decisions = get_smartbill_decisions()
+    
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -645,13 +715,16 @@ def sync_smartbill_data():
     
     if unmatched:
         st.warning(f"⚠️ {len(unmatched)} SKU-uri nemapate")
+        
         page_size = 10
         total_pages = max(1, (len(unmatched) + page_size - 1) // page_size)
         c1, _ = st.columns([1, 5])
         page = c1.number_input("Pagina", 1, total_pages, st.session_state.smartbill_page)
         st.session_state.smartbill_page = page
+        
         page_items = unmatched[(page-1)*page_size : page*page_size]
         action_map = {"Creează nou": "creaza_nou", "Asociază la SKU": "asociaza_la_sku", "Ignoră": "ignora"}
+        
         with st.expander("📋 SKU-uri necunoscute", expanded=True):
             for item in page_items:
                 c1, c2, c3, c4 = st.columns([2, 4, 1, 3])
@@ -659,21 +732,23 @@ def sync_smartbill_data():
                 c2.write(item['name'])
                 c3.write(item['stock'])
                 action = c4.selectbox("Acțiune", ["Alege..."] + list(action_map.keys()), key=f"act_{item['sku']}", label_visibility="collapsed")
+                
                 if action == "Asociază la SKU":
                     st.selectbox("Selectează produs", [""] + list(product_options.keys()), key=f"prod_{item['sku']}")
-            if st.button("💾 Salvează deciziile paginii", use_container_width=True):
-                for item in page_items:
-                    action = st.session_state.get(f"act_{item['sku']}", "Alege...")
-                    if action in action_map:
-                        code = action_map[action]
-                        pid = None
-                        if code == "asociaza_la_sku":
-                            sel = st.session_state.get(f"prod_{item['sku']}")
-                            if sel: pid = product_options[sel]
-                        save_smartbill_decision(item['sku'], code, item['name'], pid)
-                st.success("✅ Salvat")
-                time.sleep(0.5)
-                st.rerun()
+        
+        if st.button("💾 Salvează deciziile paginii", use_container_width=True):
+            for item in page_items:
+                action = st.session_state.get(f"act_{item['sku']}", "Alege...")
+                if action in action_map:
+                    code = action_map[action]
+                    pid = None
+                    if code == "asociaza_la_sku":
+                        sel = st.session_state.get(f"prod_{item['sku']}")
+                        if sel: pid = product_options[sel]
+                    save_smartbill_decision(item['sku'], code, item['name'], pid)
+            st.success("✅ Salvat")
+            time.sleep(0.5)
+            st.rerun()
     
     if not unmatched and stock_data:
         st.success("✅ Toate SKU-urile mapate!")
@@ -695,10 +770,13 @@ def sync_smartbill_data():
                 st.error(f"Eroare: {e}")
 
 # =========================
-#   UI PRINCIPAL
+# UI PRINCIPAL
 # =========================
+
 st.markdown("## 🛒 WooCommerce Import")
+
 col1, col2, col3 = st.columns(3)
+
 with col1:
     if st.button("🚀 Full Import", type="primary", use_container_width=True):
         st.session_state["import_session_id"] = str(uuid.uuid4())
@@ -706,6 +784,7 @@ with col1:
         st.session_state["import_stats"] = {}
         with st.spinner("Curăț..."): clear_staging_tables()
         st.rerun()
+
 with col2:
     if st.button("🔄 Rulează Matching", use_container_width=True):
         ls = get_latest_session_id()
@@ -716,6 +795,7 @@ with col2:
             st.rerun()
         else:
             st.error("Nu există date!")
+
 with col3:
     if st.button("⚡ Quick Refresh", use_container_width=True):
         quick_refresh_prices_and_stock()
@@ -728,7 +808,7 @@ if st.session_state["import_session_id"] and st.session_state["import_phase"] ==
         stats = fetch_and_stage_products_bulk(st.session_state["import_session_id"])
         st.session_state["import_stats"]['extract'] = stats
         st.session_state["import_phase"] = 'matching'
-    st.rerun()
+        st.rerun()
 
 if st.session_state["import_session_id"] and st.session_state["import_phase"] == 'matching':
     with st.spinner("Matching..."):
@@ -736,7 +816,7 @@ if st.session_state["import_session_id"] and st.session_state["import_phase"] ==
         st.session_state["import_stats"]['matching'] = match_stats
         if match_stats:
             st.session_state["import_phase"] = 'reconciling'
-    st.rerun()
+            st.rerun()
 
 if st.session_state["import_session_id"] and st.session_state["import_phase"] == 'reconciling':
     match_stats = st.session_state["import_stats"].get('matching', {})
@@ -745,6 +825,7 @@ if st.session_state["import_session_id"] and st.session_state["import_phase"] ==
     c2.metric("Auto", match_stats.get('auto_created', 0))
     c3.metric("Alias", match_stats.get('matched_alias', 0))
     c4.metric("Dup", match_stats.get('duplicates', 0))
+    
     pending = match_stats.get('pending_actions', 0)
     if pending == 0:
         if st.button("📦 Finalizează", type="primary"):
@@ -768,7 +849,7 @@ if st.session_state["import_session_id"] and st.session_state["import_phase"] ==
     with st.spinner("Finalizare..."):
         finalize_import(st.session_state["import_session_id"])
         st.session_state["import_phase"] = 'done'
-    st.rerun()
+        st.rerun()
 
 if st.session_state["import_phase"] == 'done':
     st.balloons()

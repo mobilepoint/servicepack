@@ -1,7 +1,6 @@
 import streamlit as st
 from woocommerce import API
 import psycopg2
-import requests
 from requests.auth import HTTPBasicAuth
 from datetime import datetime
 
@@ -18,36 +17,23 @@ st.set_page_config(
 def check_all_connections():
     """Verifică toate conexiunile la pornirea aplicației - se rulează o singură dată"""
     results = {
-        "postgresql": {"status": False, "message": "", "details": ""},
-        "woocommerce": {"status": False, "message": "", "details": ""},
-        "smartbill": {"status": False, "message": "", "details": ""}
+        "postgresql": {"status": False, "message": ""},
+        "woocommerce": {"status": False, "message": ""},
+        "smartbill": {"status": False, "message": ""}
     }
     
     # 1. VERIFICARE POSTGRESQL DIRECT
     try:
         pg_url = st.secrets["connections"]["postgresql"]["url"]
-        
         conn = psycopg2.connect(pg_url, connect_timeout=10)
         cursor = conn.cursor()
-        
         cursor.execute("SELECT version();")
-        db_version = cursor.fetchone()[0]
-        
         cursor.close()
         conn.close()
-        
         results["postgresql"]["status"] = True
-        results["postgresql"]["message"] = "Conectat"
-        version_part = db_version.split()[1] if len(db_version.split()) > 1 else "unknown"
-        results["postgresql"]["details"] = f"PostgreSQL {version_part}"
-    except KeyError:
-        results["postgresql"]["message"] = "URL lipsă"
-    except psycopg2.OperationalError as e:
-        results["postgresql"]["message"] = "Eroare conexiune"
-        results["postgresql"]["details"] = str(e)[:80]
-    except Exception as e:
-        results["postgresql"]["message"] = "Eroare necunoscută"
-        results["postgresql"]["details"] = str(e)[:80]
+        results["postgresql"]["message"] = "✓"
+    except:
+        results["postgresql"]["message"] = "✗"
     
     # 2. VERIFICARE WOOCOMMERCE API
     try:
@@ -65,40 +51,31 @@ def check_all_connections():
         
         try:
             response = wcapi.get("")
-            
             if response.status_code in range(200, 300) or response.status_code == 401:
                 results["woocommerce"]["status"] = True
-                results["woocommerce"]["message"] = "Conectat"
-                results["woocommerce"]["details"] = f"Store: {woo_url}"
+                results["woocommerce"]["message"] = "✓"
             else:
-                results["woocommerce"]["message"] = f"Cod HTTP {response.status_code}"
-                results["woocommerce"]["details"] = "Verifică credențialele"
-        except Exception as req_error:
+                results["woocommerce"]["message"] = "✗"
+        except:
             try:
                 response2 = wcapi.get("products", params={"per_page": 1})
                 if response2.status_code in range(200, 300):
                     results["woocommerce"]["status"] = True
-                    results["woocommerce"]["message"] = "Conectat"
-                    results["woocommerce"]["details"] = f"Store: {woo_url}"
+                    results["woocommerce"]["message"] = "✓"
                 else:
-                    results["woocommerce"]["message"] = f"Cod {response2.status_code}"
+                    results["woocommerce"]["message"] = "✗"
             except:
-                results["woocommerce"]["message"] = "Eroare conexiune"
-                results["woocommerce"]["details"] = str(req_error)[:80]
-                
-    except KeyError:
-        results["woocommerce"]["message"] = "Credențiale lipsă"
-    except Exception as e:
-        results["woocommerce"]["message"] = "Eroare conexiune"
-        results["woocommerce"]["details"] = str(e)[:80]
+                results["woocommerce"]["message"] = "✗"
+    except:
+        results["woocommerce"]["message"] = "✗"
     
     # 3. VERIFICARE SMARTBILL API
     try:
+        import requests
         sb_email = st.secrets["connections"]["smartbill"]["EMAIL"]
         sb_token = st.secrets["connections"]["smartbill"]["TOKEN"]
         sb_cif = st.secrets["connections"]["smartbill"]["CIF"]
         
-        # Endpoint corect pentru SmartBill - verificare liste (taxe)
         url = "https://ws.smartbill.ro/SBORO/api/tax"
         auth = HTTPBasicAuth(sb_email, sb_token)
         headers = {
@@ -107,8 +84,8 @@ def check_all_connections():
         }
         
         response = requests.get(
-            url, 
-            auth=auth, 
+            url,
+            auth=auth,
             headers=headers,
             params={"cif": sb_cif},
             timeout=10
@@ -116,89 +93,146 @@ def check_all_connections():
         
         if response.status_code == 200:
             results["smartbill"]["status"] = True
-            results["smartbill"]["message"] = "Conectat"
-            results["smartbill"]["details"] = f"CIF: {sb_cif}"
-        elif response.status_code == 401:
-            results["smartbill"]["message"] = "Autentificare eșuată"
-            results["smartbill"]["details"] = "Verifică email/token"
-        elif response.status_code == 403:
-            results["smartbill"]["message"] = "Acces interzis"
-            results["smartbill"]["details"] = "Verifică abonamentul (Platinum)"
+            results["smartbill"]["message"] = "✓"
         else:
-            results["smartbill"]["message"] = f"Cod HTTP {response.status_code}"
-            results["smartbill"]["details"] = response.text[:80] if response.text else ""
-            
-    except KeyError:
-        results["smartbill"]["message"] = "Credențiale lipsă"
-    except requests.exceptions.Timeout:
-        results["smartbill"]["message"] = "Timeout conexiune"
-    except Exception as e:
-        results["smartbill"]["message"] = "Eroare conexiune"
-        results["smartbill"]["details"] = str(e)[:80]
+            results["smartbill"]["message"] = "✗"
+    except:
+        results["smartbill"]["message"] = "✗"
     
     results["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return results
 
-# ===== SIDEBAR - AFIȘARE STATUS AUTOMAT =====
+
+# ===== FUNCȚIE VERIFICARE TIMESTAMP-URI TABELE =====
+@st.cache_data(ttl=60)  # Cache pentru 60 secunde
+def check_table_timestamps():
+    """Verifică cel mai vechi timestamp din fiecare tabel Supabase"""
+    table_status = {
+        "woo_stock": {"name": "🛒 Stoc WooCommerce", "timestamp": None, "status": "⏳"},
+        "woo_preturi": {"name": "💰 Prețuri WooCommerce", "timestamp": None, "status": "⏳"},
+        "smartbill_stock": {"name": "📦 Stoc SmartBill", "timestamp": None, "status": "⏳"},
+        "smartbill_pret_intrare": {"name": "💵 Preț Intrare SmartBill", "timestamp": None, "status": "⏳"}
+    }
+    
+    try:
+        pg_url = st.secrets["connections"]["postgresql"]["url"]
+        conn = psycopg2.connect(pg_url, connect_timeout=10)
+        cursor = conn.cursor()
+        
+        for table_key in table_status.keys():
+            try:
+                # Caută coloana de timestamp (poate fi updated_at, timestamp, last_update, etc.)
+                cursor.execute(f"""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name = '{table_key}' 
+                    AND (column_name LIKE '%updated%' OR column_name LIKE '%timestamp%' OR column_name LIKE '%date%')
+                    ORDER BY ordinal_position
+                    LIMIT 1;
+                """)
+                
+                result = cursor.fetchone()
+                if result:
+                    timestamp_column = result[0]
+                    
+                    # Obține cel mai vechi timestamp (ultimul update)
+                    cursor.execute(f"""
+                        SELECT MAX({timestamp_column}) 
+                        FROM {table_key};
+                    """)
+                    
+                    max_timestamp = cursor.fetchone()[0]
+                    
+                    if max_timestamp:
+                        table_status[table_key]["timestamp"] = max_timestamp
+                        table_status[table_key]["status"] = "✓"
+                    else:
+                        table_status[table_key]["status"] = "⚠️"
+                else:
+                    table_status[table_key]["status"] = "❓"
+                    
+            except Exception as e:
+                table_status[table_key]["status"] = "✗"
+                table_status[table_key]["timestamp"] = str(e)[:30]
+        
+        cursor.close()
+        conn.close()
+        
+    except Exception as e:
+        # Dacă conexiunea eșuează, marcăm toate ca eroare
+        for table_key in table_status.keys():
+            table_status[table_key]["status"] = "✗"
+    
+    return table_status
+
+
+# ===== SIDEBAR - AFIȘARE STATUS COMPACT =====
 with st.sidebar:
-    st.title("🔌 Status Conexiuni")
-    st.caption("Verificare automată la pornire")
-    st.divider()
+    st.markdown("### 🔌 Conexiuni")
     
     connection_status = check_all_connections()
     
-    # 1. PostgreSQL Direct
-    st.write("### 🗄️ PostgreSQL")
-    if connection_status["postgresql"]["status"]:
-        st.success(f"✅ {connection_status['postgresql']['message']}")
-        if connection_status["postgresql"]["details"]:
-            st.caption(connection_status["postgresql"]["details"])
-    else:
-        st.error(f"❌ {connection_status['postgresql']['message']}")
-        if connection_status["postgresql"]["details"]:
-            st.caption(connection_status["postgresql"]["details"])
+    # Status compact într-un singur rând pentru fiecare conexiune
+    cols = st.columns([3, 1])
+    with cols[0]:
+        st.caption("PostgreSQL")
+    with cols[1]:
+        if connection_status["postgresql"]["status"]:
+            st.success("✓", icon="✅")
+        else:
+            st.error("✗", icon="❌")
     
-    # 2. WooCommerce API
-    st.write("### 🛒 WooCommerce")
-    if connection_status["woocommerce"]["status"]:
-        st.success(f"✅ {connection_status['woocommerce']['message']}")
-        if connection_status["woocommerce"]["details"]:
-            st.caption(connection_status["woocommerce"]["details"])
-    else:
-        st.error(f"❌ {connection_status['woocommerce']['message']}")
-        if connection_status["woocommerce"]["details"]:
-            st.caption(connection_status["woocommerce"]["details"])
+    cols = st.columns([3, 1])
+    with cols[0]:
+        st.caption("WooCommerce")
+    with cols[1]:
+        if connection_status["woocommerce"]["status"]:
+            st.success("✓", icon="✅")
+        else:
+            st.error("✗", icon="❌")
     
-    # 3. SmartBill API
-    st.write("### 🧾 SmartBill")
-    if connection_status["smartbill"]["status"]:
-        st.success(f"✅ {connection_status['smartbill']['message']}")
-        if connection_status["smartbill"]["details"]:
-            st.caption(connection_status["smartbill"]["details"])
-    else:
-        st.error(f"❌ {connection_status['smartbill']['message']}")
-        if connection_status["smartbill"]["details"]:
-            st.caption(connection_status["smartbill"]["details"])
+    cols = st.columns([3, 1])
+    with cols[0]:
+        st.caption("SmartBill")
+    with cols[1]:
+        if connection_status["smartbill"]["status"]:
+            st.success("✓", icon="✅")
+        else:
+            st.error("✗", icon="❌")
     
     st.divider()
-    st.caption(f"🕐 Verificat: {connection_status['timestamp']}")
     
-    if st.button("🔄 Re-verifică", use_container_width=True):
+    # ===== STATUS TABELE SUPABASE =====
+    st.markdown("### 📊 Ultima Actualizare Date")
+    
+    table_timestamps = check_table_timestamps()
+    
+    for table_key, table_info in table_timestamps.items():
+        cols = st.columns([1, 4])
+        with cols[0]:
+            st.markdown(f"{table_info['status']}")
+        with cols[1]:
+            st.caption(f"**{table_info['name']}**")
+            if table_info['timestamp']:
+                if isinstance(table_info['timestamp'], datetime):
+                    st.caption(f"🕐 {table_info['timestamp'].strftime('%d.%m %H:%M')}")
+                else:
+                    st.caption(f"🕐 {table_info['timestamp']}")
+            else:
+                st.caption("🕐 N/A")
+    
+    st.divider()
+    
+    # Buton refresh compact
+    if st.button("🔄 Actualizează", use_container_width=True, type="secondary"):
         st.cache_resource.clear()
+        st.cache_data.clear()
         st.rerun()
     
-    st.divider()
-    
-    with st.expander("🔗 Link-uri utile"):
-        st.markdown("""
-        - [WooCommerce Admin](https://servicepack.ro/wp-admin)
-        - [SmartBill Dashboard](https://www.smartbill.ro)
-        - [SmartBill API Docs](https://api.smartbill.ro)
-        """)
+    st.caption(f"Verificat: {datetime.now().strftime('%H:%M:%S')}")
 
 # ===== PAGINA PRINCIPALĂ =====
 st.title("🛒 Aplicație Management Magazin WooCommerce")
-
 st.divider()
 
 # Afișare metrici generale
@@ -214,14 +248,14 @@ with col1:
         value=f"{total_connections}/3",
         delta="Toate funcționale" if total_connections == 3 else f"{3-total_connections} inactive"
     )
-    
+
 with col2:
     status_emoji = "✅ Activ" if total_connections == 3 else "⚠️ Parțial" if total_connections > 0 else "❌ Inactiv"
     st.metric(
         label="📊 Status general",
         value=status_emoji
     )
-    
+
 with col3:
     st.metric(
         label="📦 Module disponibile",
@@ -249,4 +283,4 @@ else:
         """)
 
 st.divider()
-st.caption("💡 **Tip**: Folosește butonul 'Re-verifică' din sidebar pentru a testa din nou conexiunile după modificări.")
+st.caption("💡 **Tip**: Folosește butonul 'Actualizează' din sidebar pentru a verifica din nou conexiunile și statusul datelor.")

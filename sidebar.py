@@ -75,10 +75,30 @@ def check_all_connections():
 def check_table_timestamps():
     """Verifică cel mai recent timestamp din tabelele Supabase"""
     tables = {
-        "woo_stoc": {"name": "🛒 Stoc WooCommerce", "ts": None, "status": "⏳"},
-        "woo_preturi": {"name": "💰 Prețuri WooCommerce", "ts": None, "status": "⏳"},
-        "smartbill_stoc": {"name": "📦 Stoc SmartBill", "ts": None, "status": "⏳"},
-        "smartbill_pret_intrare": {"name": "💵 Preț Intrare SmartBill", "ts": None, "status": "⏳"}
+        "woo_stoc": {
+            "name": "🛒 Stoc WooCommerce", 
+            "ts": None, 
+            "status": "⏳",
+            "column": "last_sync"
+        },
+        "woo_preturi": {
+            "name": "💰 Prețuri WooCommerce", 
+            "ts": None, 
+            "status": "⏳",
+            "column": "last_sync"
+        },
+        "smartbill_stoc": {
+            "name": "📦 Stoc SmartBill", 
+            "ts": None, 
+            "status": "⏳",
+            "column": "last_sync"
+        },
+        "smartbill_pret_intrare": {
+            "name": "💵 Preț Intrare SmartBill", 
+            "ts": None, 
+            "status": "⏳",
+            "column": "updated_at"  # DIFERIT - acest tabel folosește updated_at
+        }
     }
     
     try:
@@ -86,24 +106,26 @@ def check_table_timestamps():
         conn = psycopg2.connect(pg_url, connect_timeout=10)
         cursor = conn.cursor()
         
-        for table_key in tables.keys():
+        for table_key, table_config in tables.items():
             try:
-                # Verifică dacă tabelul există și are coloana last_sync
+                timestamp_column = table_config["column"]
+                
+                # Verifică dacă tabelul există și are coloana specificată
                 cursor.execute(f"""
                     SELECT EXISTS (
                         SELECT FROM information_schema.columns 
                         WHERE table_schema = 'public' 
                         AND table_name = '{table_key}' 
-                        AND column_name = 'last_sync'
+                        AND column_name = '{timestamp_column}'
                     );
                 """)
                 
                 exists = cursor.fetchone()[0]
                 
                 if exists:
-                    # Obține MAX(last_sync) - cel mai recent update
+                    # Obține MAX(timestamp_column) - cel mai recent update
                     cursor.execute(f"""
-                        SELECT MAX(last_sync) 
+                        SELECT MAX({timestamp_column}) 
                         FROM public.{table_key};
                     """)
                     

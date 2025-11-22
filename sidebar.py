@@ -5,14 +5,14 @@ from datetime import datetime
 # ===== FUNCȚIE VERIFICARE CONEXIUNI =====
 @st.cache_resource
 def check_all_connections():
-    """Verifică toate conexiunile la pornirea aplicației - se rulează o singură dată"""
+    """Verifică toate conexiunile la pornirea aplicației"""
     results = {
-        "postgresql": {"status": False, "message": ""},
-        "woocommerce": {"status": False, "message": ""},
-        "smartbill": {"status": False, "message": ""}
+        "postgresql": {"status": False},
+        "woocommerce": {"status": False},
+        "smartbill": {"status": False}
     }
     
-    # 1. VERIFICARE POSTGRESQL DIRECT
+    # 1. VERIFICARE POSTGRESQL
     try:
         pg_url = st.secrets["connections"]["postgresql"]["url"]
         conn = psycopg2.connect(pg_url, connect_timeout=10)
@@ -21,9 +21,8 @@ def check_all_connections():
         cursor.close()
         conn.close()
         results["postgresql"]["status"] = True
-        results["postgresql"]["message"] = "✓"
     except:
-        results["postgresql"]["message"] = "✗"
+        pass
     
     # 2. VERIFICARE WOOCOMMERCE API
     try:
@@ -41,24 +40,13 @@ def check_all_connections():
         )
         
         try:
-            response = wcapi.get("")
-            if response.status_code in range(200, 300) or response.status_code == 401:
+            response = wcapi.get("products", params={"per_page": 1})
+            if response.status_code in range(200, 300):
                 results["woocommerce"]["status"] = True
-                results["woocommerce"]["message"] = "✓"
-            else:
-                results["woocommerce"]["message"] = "✗"
         except:
-            try:
-                response2 = wcapi.get("products", params={"per_page": 1})
-                if response2.status_code in range(200, 300):
-                    results["woocommerce"]["status"] = True
-                    results["woocommerce"]["message"] = "✓"
-                else:
-                    results["woocommerce"]["message"] = "✗"
-            except:
-                results["woocommerce"]["message"] = "✗"
+            pass
     except:
-        results["woocommerce"]["message"] = "✗"
+        pass
     
     # 3. VERIFICARE SMARTBILL API
     try:
@@ -70,40 +58,27 @@ def check_all_connections():
         
         url = "https://ws.smartbill.ro/SBORO/api/tax"
         auth = HTTPBasicAuth(sb_email, sb_token)
-        headers = {
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-        }
+        headers = {"Accept": "application/json", "Content-Type": "application/json"}
         
-        response = requests.get(
-            url,
-            auth=auth,
-            headers=headers,
-            params={"cif": sb_cif},
-            timeout=10
-        )
+        response = requests.get(url, auth=auth, headers=headers, params={"cif": sb_cif}, timeout=10)
         
         if response.status_code == 200:
             results["smartbill"]["status"] = True
-            results["smartbill"]["message"] = "✓"
-        else:
-            results["smartbill"]["message"] = "✗"
     except:
-        results["smartbill"]["message"] = "✗"
+        pass
     
-    results["timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return results
 
 
 # ===== FUNCȚIE VERIFICARE TIMESTAMP-URI TABELE =====
-@st.cache_data(ttl=60)  # Cache pentru 60 secunde
+@st.cache_data(ttl=60)
 def check_table_timestamps():
-    """Verifică cel mai recent timestamp din fiecare tabel Supabase"""
-    table_status = {
-        "woo_stock": {"name": "🛒 Stoc WooCommerce", "timestamp": None, "status": "⏳", "column": "last_sync"},
-        "woo_preturi": {"name": "💰 Prețuri WooCommerce", "timestamp": None, "status": "⏳", "column": "last_sync"},
-        "smartbill_stock": {"name": "📦 Stoc SmartBill", "timestamp": None, "status": "⏳", "column": "last_sync"},
-        "smartbill_pret_intrare": {"name": "💵 Preț Intrare SmartBill", "timestamp": None, "status": "⏳", "column": "last_sync"}
+    """Verifică cel mai recent timestamp din tabelele Supabase"""
+    tables = {
+        "woo_stoc": {"name": "🛒 Stoc WooCommerce", "ts": None, "status": "⏳"},
+        "woo_preturi": {"name": "💰 Prețuri WooCommerce", "ts": None, "status": "⏳"},
+        "smartbill_stoc": {"name": "📦 Stoc SmartBill", "ts": None, "status": "⏳"},
+        "smartbill_pret_intrare": {"name": "💵 Preț Intrare SmartBill", "ts": None, "status": "⏳"}
     }
     
     try:
@@ -111,121 +86,120 @@ def check_table_timestamps():
         conn = psycopg2.connect(pg_url, connect_timeout=10)
         cursor = conn.cursor()
         
-        for table_key, table_info in table_status.items():
+        for table_key in tables.keys():
             try:
-                timestamp_column = table_info["column"]
-                
-                # Verifică dacă coloana există în tabel
+                # Verifică dacă tabelul există și are coloana last_sync
                 cursor.execute(f"""
-                    SELECT column_name 
-                    FROM information_schema.columns 
-                    WHERE table_name = '{table_key}' 
-                    AND column_name = '{timestamp_column}';
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.columns 
+                        WHERE table_schema = 'public' 
+                        AND table_name = '{table_key}' 
+                        AND column_name = 'last_sync'
+                    );
                 """)
                 
-                column_exists = cursor.fetchone()
+                exists = cursor.fetchone()[0]
                 
-                if column_exists:
-                    # Obține cel mai recent timestamp (MAX = ultimul update)
+                if exists:
+                    # Obține MAX(last_sync) - cel mai recent update
                     cursor.execute(f"""
-                        SELECT MAX({timestamp_column}) 
-                        FROM {table_key};
+                        SELECT MAX(last_sync) 
+                        FROM public.{table_key};
                     """)
                     
-                    max_timestamp = cursor.fetchone()[0]
+                    result = cursor.fetchone()
+                    max_ts = result[0] if result else None
                     
-                    if max_timestamp:
-                        table_status[table_key]["timestamp"] = max_timestamp
-                        table_status[table_key]["status"] = "✓"
+                    if max_ts:
+                        tables[table_key]["ts"] = max_ts
+                        tables[table_key]["status"] = "✓"
                     else:
-                        table_status[table_key]["status"] = "⚠️"
-                        table_status[table_key]["timestamp"] = "Fără date"
+                        tables[table_key]["status"] = "⚠️"
+                        tables[table_key]["ts"] = "Fără date"
                 else:
-                    table_status[table_key]["status"] = "❓"
-                    table_status[table_key]["timestamp"] = "Coloană lipsă"
+                    tables[table_key]["status"] = "❓"
+                    tables[table_key]["ts"] = "Coloană lipsă"
                     
             except Exception as e:
-                table_status[table_key]["status"] = "✗"
-                table_status[table_key]["timestamp"] = f"Eroare"
+                tables[table_key]["status"] = "✗"
+                tables[table_key]["ts"] = "Eroare"
         
         cursor.close()
         conn.close()
         
-    except Exception as e:
-        # Dacă conexiunea eșuează, marcăm toate ca eroare
-        for table_key in table_status.keys():
-            table_status[table_key]["status"] = "✗"
-            table_status[table_key]["timestamp"] = "DB offline"
+    except:
+        for table_key in tables.keys():
+            tables[table_key]["status"] = "✗"
+            tables[table_key]["ts"] = "DB offline"
     
-    return table_status
+    return tables
 
 
 # ===== FUNCȚIE PENTRU AFIȘARE SIDEBAR =====
 def render_sidebar():
-    """Afișează sidebar-ul cu statusuri - apelează în toate paginile"""
+    """Afișează sidebar-ul compact cu statusuri"""
     with st.sidebar:
+        # === CONEXIUNI ===
         st.markdown("### 🔌 Conexiuni")
         
-        connection_status = check_all_connections()
+        conn_status = check_all_connections()
         
-        # Status compact într-un singur rând pentru fiecare conexiune
-        cols = st.columns([3, 1])
-        with cols[0]:
+        # PostgreSQL
+        col1, col2 = st.columns([3, 1])
+        with col1:
             st.caption("PostgreSQL")
-        with cols[1]:
-            if connection_status["postgresql"]["status"]:
-                st.markdown("✅")
-            else:
-                st.markdown("❌")
+        with col2:
+            st.markdown("✅" if conn_status["postgresql"]["status"] else "❌")
         
-        cols = st.columns([3, 1])
-        with cols[0]:
+        # WooCommerce
+        col1, col2 = st.columns([3, 1])
+        with col1:
             st.caption("WooCommerce")
-        with cols[1]:
-            if connection_status["woocommerce"]["status"]:
-                st.markdown("✅")
-            else:
-                st.markdown("❌")
+        with col2:
+            st.markdown("✅" if conn_status["woocommerce"]["status"] else "❌")
         
-        cols = st.columns([3, 1])
-        with cols[0]:
+        # SmartBill
+        col1, col2 = st.columns([3, 1])
+        with col1:
             st.caption("SmartBill")
-        with cols[1]:
-            if connection_status["smartbill"]["status"]:
-                st.markdown("✅")
-            else:
-                st.markdown("❌")
+        with col2:
+            st.markdown("✅" if conn_status["smartbill"]["status"] else "❌")
         
         st.divider()
         
-        # ===== STATUS TABELE SUPABASE =====
+        # === ULTIMA ACTUALIZARE TABELE ===
         st.markdown("### 📊 Ultima Actualizare")
         
-        table_timestamps = check_table_timestamps()
+        tables = check_table_timestamps()
         
-        for table_key, table_info in table_timestamps.items():
-            with st.container():
-                cols = st.columns([1, 5])
-                with cols[0]:
-                    st.markdown(f"{table_info['status']}")
-                with cols[1]:
-                    st.caption(f"**{table_info['name']}**")
-                    if table_info['timestamp'] and table_info['status'] == "✓":
-                        if isinstance(table_info['timestamp'], datetime):
-                            st.caption(f"🕐 {table_info['timestamp'].strftime('%d.%m.%y %H:%M')}")
-                        else:
-                            # Dacă e string, încearcă să-l parsezi
-                            try:
-                                ts = datetime.fromisoformat(str(table_info['timestamp']).replace('Z', '+00:00'))
-                                st.caption(f"🕐 {ts.strftime('%d.%m.%y %H:%M')}")
-                            except:
-                                st.caption(f"🕐 {table_info['timestamp']}")
+        for table_key, table_info in tables.items():
+            col1, col2 = st.columns([1, 5])
+            with col1:
+                st.markdown(table_info["status"])
+            with col2:
+                st.caption(f"**{table_info['name']}**")
+                
+                # Formatare timestamp
+                if table_info["ts"] and table_info["status"] == "✓":
+                    if isinstance(table_info["ts"], datetime):
+                        st.caption(f"🕐 {table_info['ts'].strftime('%d.%m.%y %H:%M')}")
                     else:
-                        st.caption(f"🕐 {table_info['timestamp'] if table_info['timestamp'] else 'N/A'}")
+                        try:
+                            # Parse string ISO format
+                            ts_str = str(table_info["ts"])
+                            if 'T' in ts_str:
+                                ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))
+                            else:
+                                ts = datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S')
+                            st.caption(f"🕐 {ts.strftime('%d.%m.%y %H:%M')}")
+                        except:
+                            st.caption(f"🕐 {table_info['ts']}")
+                else:
+                    st.caption(f"🕐 {table_info['ts'] if table_info['ts'] else 'N/A'}")
         
         st.divider()
         
-        # Buton refresh compact
+        # === BUTON REFRESH ===
         if st.button("🔄 Actualizează", use_container_width=True, type="secondary"):
             st.cache_resource.clear()
             st.cache_data.clear()

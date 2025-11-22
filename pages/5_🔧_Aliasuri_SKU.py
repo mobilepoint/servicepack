@@ -1,3 +1,6 @@
+from sidebar import render_sidebar
+render_sidebar()
+
 # pages/5_🔧_Aliasuri_SKU.py
 import re
 from decimal import Decimal, InvalidOperation

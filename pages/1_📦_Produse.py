@@ -1,3 +1,6 @@
+from sidebar import render_sidebar
+render_sidebar()
+
 # pages/1_📦_Produse.py
 
 import uuid

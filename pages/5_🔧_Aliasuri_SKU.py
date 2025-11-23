@@ -1,8 +1,3 @@
-from sidebar import render_sidebar
-render_sidebar()
-# AUTENTIFICARE
-if not check_password():
-    st.stop()
 
 
 # pages/5_🔧_Aliasuri_SKU.py
@@ -13,6 +8,8 @@ import pandas as pd
 import streamlit as st
 import psycopg2
 from psycopg2.extras import RealDictCursor
+from sidebar import render_sidebar
+from auth_simple import check_password
 
 # =========================
 #   CONFIG
@@ -20,6 +17,12 @@ from psycopg2.extras import RealDictCursor
 st.set_page_config(page_title="Admin aliasuri SKU", layout="wide")
 st.title("🔧 Admin aliasuri SKU")
 
+# AUTENTIFICARE
+if not check_password():
+    st.stop()
+
+# SIDEBAR
+render_sidebar()
 # =========================
 #   POSTGRESQL CONNECTION
 # =========================

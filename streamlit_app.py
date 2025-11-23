@@ -18,12 +18,10 @@ if not check_password():
 render_sidebar()
 
 # ===== PAGINA PRINCIPALĂ =====
-st.title("🏠 Dashboard Central - Sistem ERP Magazin")
-st.markdown("**Centrul tău de comandă pentru management integrat WooCommerce, SmartBill și FoneDay**")
+st.title("🏠 Dashboard Central")
 st.divider()
 
-# Afișare metrici generale
-col1, col2, col3, col4 = st.columns(4)
+
 
 from sidebar import check_all_connections
 connection_status = check_all_connections()

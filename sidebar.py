@@ -205,6 +205,19 @@ def check_table_timestamps():
 def render_sidebar():
     """Afișează sidebar-ul compact cu statusuri"""
     with st.sidebar:
+        # === HEADER CUSTOM ===
+        st.markdown("""
+            <style>
+                [data-testid="stSidebarNav"] {
+                    display: none;
+                }
+            </style>
+        """, unsafe_allow_html=True)
+        
+        # Header personalizat
+        st.markdown("## 🏠 Dashboard")
+        st.divider()
+             
         # === CONEXIUNI API ===
         st.markdown("### 🔌 Conexiuni API")
         

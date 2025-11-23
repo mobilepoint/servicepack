@@ -1,5 +1,9 @@
 from sidebar import render_sidebar
 render_sidebar()
+# AUTENTIFICARE
+if not check_password():
+    st.stop()
+
 
 # pages/5_🔧_Aliasuri_SKU.py
 import re

@@ -203,26 +203,6 @@ def check_table_timestamps():
 def render_sidebar():
     """Afișează sidebar-ul compact cu statusuri"""
     with st.sidebar:
-        # === CSS PENTRU A SCHIMBA DOAR TEXTUL "streamlit app" =====
-        st.markdown("""
-            <style>
-                /* Ascunde doar primul element (streamlit app), NU toată navigarea */
-                section[data-testid="stSidebarNav"] > ul > li:first-child {
-                    display: none;
-                }
-                
-                /* Sau schimbă textul direct */
-                section[data-testid="stSidebarNav"] > ul > li:first-child > a > span {
-                    display: none;
-                }
-                
-                section[data-testid="stSidebarNav"] > ul > li:first-child > a::before {
-                    content: "🏠 Dashboard";
-                    font-weight: 600;
-                }
-            </style>
-        """, unsafe_allow_html=True)
-        
         # === CONEXIUNI API ===
         st.markdown("### 🔌 Conexiuni API")
         

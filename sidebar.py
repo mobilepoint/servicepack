@@ -9,7 +9,8 @@ def check_all_connections():
     results = {
         "postgresql": {"status": False},
         "woocommerce": {"status": False},
-        "smartbill": {"status": False}
+        "smartbill": {"status": False},
+        "foneday": {"status": False}
     }
     
     # 1. VERIFICARE POSTGRESQL
@@ -67,6 +68,30 @@ def check_all_connections():
     except:
         pass
     
+    # 4. VERIFICARE FONEDAY API
+    try:
+        import requests
+        foneday_url = st.secrets["FONEDAY_API_URL"]
+        foneday_token = st.secrets["FONEDAY_API_TOKEN"]
+        
+        headers = {
+            "Authorization": f"Bearer {foneday_token}",
+            "Accept": "application/json"
+        }
+        
+        # Test endpoint - verifică dacă API-ul răspunde
+        response = requests.get(
+            f"{foneday_url}/products",
+            headers=headers,
+            timeout=10,
+            params={"per_page": 1}
+        )
+        
+        if response.status_code in range(200, 300):
+            results["foneday"]["status"] = True
+    except:
+        pass
+    
     return results
 
 
@@ -97,7 +122,7 @@ def check_table_timestamps():
             "name": "💵 Preț Intrare SmartBill", 
             "ts": None, 
             "status": "⏳",
-            "column": "updated_at"  # DIFERIT - acest tabel folosește updated_at
+            "column": "updated_at"
         }
     }
     
@@ -110,7 +135,6 @@ def check_table_timestamps():
             try:
                 timestamp_column = table_config["column"]
                 
-                # Verifică dacă tabelul există și are coloana specificată
                 cursor.execute(f"""
                     SELECT EXISTS (
                         SELECT FROM information_schema.columns 
@@ -123,7 +147,6 @@ def check_table_timestamps():
                 exists = cursor.fetchone()[0]
                 
                 if exists:
-                    # Obține MAX(timestamp_column) - cel mai recent update
                     cursor.execute(f"""
                         SELECT MAX({timestamp_column}) 
                         FROM public.{table_key};
@@ -161,8 +184,8 @@ def check_table_timestamps():
 def render_sidebar():
     """Afișează sidebar-ul compact cu statusuri"""
     with st.sidebar:
-        # === CONEXIUNI ===
-        st.markdown("### 🔌 Conexiuni")
+        # === CONEXIUNI API ===
+        st.markdown("### 🔌 Conexiuni API")
         
         conn_status = check_all_connections()
         
@@ -187,6 +210,13 @@ def render_sidebar():
         with col2:
             st.markdown("✅" if conn_status["smartbill"]["status"] else "❌")
         
+        # FoneDay (NOU)
+        col1, col2 = st.columns([3, 1])
+        with col1:
+            st.caption("📱 FoneDay")
+        with col2:
+            st.markdown("✅" if conn_status["foneday"]["status"] else "❌")
+        
         st.divider()
         
         # === ULTIMA ACTUALIZARE TABELE ===
@@ -201,13 +231,11 @@ def render_sidebar():
             with col2:
                 st.caption(f"**{table_info['name']}**")
                 
-                # Formatare timestamp
                 if table_info["ts"] and table_info["status"] == "✓":
                     if isinstance(table_info["ts"], datetime):
                         st.caption(f"🕐 {table_info['ts'].strftime('%d.%m.%y %H:%M')}")
                     else:
                         try:
-                            # Parse string ISO format
                             ts_str = str(table_info["ts"])
                             if 'T' in ts_str:
                                 ts = datetime.fromisoformat(ts_str.replace('Z', '+00:00'))

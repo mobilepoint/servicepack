@@ -23,7 +23,7 @@ def check_all_connections():
         cursor.close()
         conn.close()
         results["postgresql"]["status"] = True
-    except:
+    except Exception as e:
         pass
     
     # 2. VERIFICARE WOOCOMMERCE API
@@ -41,13 +41,10 @@ def check_all_connections():
             timeout=15
         )
         
-        try:
-            response = wcapi.get("products", params={"per_page": 1})
-            if response.status_code in range(200, 300):
-                results["woocommerce"]["status"] = True
-        except:
-            pass
-    except:
+        response = wcapi.get("products", params={"per_page": 1})
+        if response.status_code in range(200, 300):
+            results["woocommerce"]["status"] = True
+    except Exception as e:
         pass
     
     # 3. VERIFICARE SMARTBILL API
@@ -65,50 +62,47 @@ def check_all_connections():
         
         if response.status_code == 200:
             results["smartbill"]["status"] = True
-    except:
+    except Exception as e:
         pass
     
-    # 4. VERIFICARE FONEDAY API - EXACT CA ÎN dashboard.py
+    # 4. VERIFICARE FONEDAY API - ACUM SUB connections.foneday
     try:
-        # Folosește direct din secrets, nu din connections
-        foneday_api_url = st.secrets["FONEDAY_API_URL"]
-        foneday_api_token = st.secrets["FONEDAY_API_TOKEN"]
+        foneday_api_url = st.secrets["connections"]["foneday"]["API_URL"]
+        foneday_api_token = st.secrets["connections"]["foneday"]["API_TOKEN"]
         
         headers = {
             "Authorization": f"Bearer {foneday_api_token}",
             "Content-Type": "application/json"
         }
         
-        # Test cu /products - exact ca în dashboard.py
+        # Test cu /products
         response = requests.get(
             f"{foneday_api_url}/products",
             headers=headers,
             timeout=10
         )
         
-        # Acceptă orice răspuns valid (200, 201, etc)
         if response.status_code in range(200, 300):
             results["foneday"]["status"] = True
             
     except Exception as e:
-        # Log pentru debugging
         pass
     
     return results
 
 
-# ===== FUNCȚIE PENTRU A OBȚINE PRODUS FONEDAY (din dashboard.py) =====
+# ===== FUNCȚIE PENTRU A OBȚINE PRODUS FONEDAY =====
 @st.cache_data(ttl=300)
 def get_foneday_product_by_sku(foneday_sku: str):
-    """Obține produs din Foneday după SKU-ul lor - EXACT CA ÎN dashboard.py"""
+    """Obține produs din FoneDay după SKU"""
     try:
         headers = {
-            "Authorization": f"Bearer {st.secrets['FONEDAY_API_TOKEN']}",
+            "Authorization": f"Bearer {st.secrets['connections']['foneday']['API_TOKEN']}",
             "Content-Type": "application/json"
         }
         
         response = requests.get(
-            f"{st.secrets['FONEDAY_API_URL']}/product/{foneday_sku}",
+            f"{st.secrets['connections']['foneday']['API_URL']}/product/{foneday_sku}",
             headers=headers,
             timeout=10
         )

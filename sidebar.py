@@ -68,96 +68,43 @@ def check_all_connections():
     except:
         pass
     
-    # 4. VERIFICARE FONEDAY API - VERSIUNE SIMPLIFICATĂ
+    # 4. VERIFICARE FONEDAY API - EXACT CA ÎN dashboard.py
     try:
-        # Încearcă mai multe endpoint-uri pentru a testa conexiunea
+        # Folosește direct din secrets, nu din connections
         foneday_api_url = st.secrets["FONEDAY_API_URL"]
         foneday_api_token = st.secrets["FONEDAY_API_TOKEN"]
         
         headers = {
             "Authorization": f"Bearer {foneday_api_token}",
-            "Accept": "application/json"
+            "Content-Type": "application/json"
         }
         
-        # Test 1: Încearcă /products
-        try:
-            response = requests.get(
-                f"{foneday_api_url}/products",
-                headers=headers,
-                timeout=10
-            )
-            if response.status_code in [200, 201]:
-                results["foneday"]["status"] = True
-                return results
-        except:
-            pass
+        # Test cu /products - exact ca în dashboard.py
+        response = requests.get(
+            f"{foneday_api_url}/products",
+            headers=headers,
+            timeout=10
+        )
         
-        # Test 2: Încearcă /products cu parametri
-        try:
-            response = requests.get(
-                f"{foneday_api_url}/products",
-                headers=headers,
-                params={"per_page": 1, "page": 1},
-                timeout=10
-            )
-            if response.status_code in [200, 201]:
-                results["foneday"]["status"] = True
-                return results
-        except:
-            pass
-        
-        # Test 3: Verifică doar dacă tokenul este valid (orice răspuns != 401/403)
-        try:
-            response = requests.get(
-                f"{foneday_api_url}/products",
-                headers=headers,
-                timeout=10
-            )
-            # Dacă primim orice răspuns care nu e 401 sau 403, tokenul e valid
-            if response.status_code not in [401, 403]:
-                results["foneday"]["status"] = True
-        except:
-            pass
+        # Acceptă orice răspuns valid (200, 201, etc)
+        if response.status_code in range(200, 300):
+            results["foneday"]["status"] = True
             
     except Exception as e:
+        # Log pentru debugging
         pass
     
     return results
 
 
-# ===== FUNCȚIE PENTRU A OBȚINE PRODUS FONEDAY =====
-@st.cache_data(ttl=300)
-def get_foneday_products(page=1, per_page=10):
-    """Obține produse din FoneDay API"""
-    try:
-        headers = {
-            "Authorization": f"Bearer {st.secrets['FONEDAY_API_TOKEN']}",
-            "Accept": "application/json"
-        }
-        
-        response = requests.get(
-            f"{st.secrets['FONEDAY_API_URL']}/products",
-            headers=headers,
-            params={"page": page, "per_page": per_page},
-            timeout=15
-        )
-        
-        if response.status_code == 200:
-            return response.json()
-        
-        return None
-    except Exception as e:
-        st.error(f"Eroare FoneDay API: {e}")
-        return None
-
-
+# ===== FUNCȚIE PENTRU A OBȚINE PRODUS FONEDAY (din dashboard.py) =====
 @st.cache_data(ttl=300)
 def get_foneday_product_by_sku(foneday_sku: str):
-    """Obține produs din FoneDay după SKU"""
+    """Obține produs din Foneday după SKU-ul lor - EXACT CA ÎN dashboard.py"""
     try:
         headers = {
             "Authorization": f"Bearer {st.secrets['FONEDAY_API_TOKEN']}",
-            "Accept": "application/json"
+            "Content-Type": "application/json"
         }
         
         response = requests.get(

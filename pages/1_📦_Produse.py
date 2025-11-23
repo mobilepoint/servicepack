@@ -1,10 +1,3 @@
-from sidebar import render_sidebar
-render_sidebar()
-# AUTENTIFICARE
-if not check_password():
-    st.stop()
-
-
 # pages/1_📦_Produse.py
 
 import uuid
@@ -19,6 +12,15 @@ import requests
 from requests.auth import HTTPBasicAuth
 import pandas as pd
 import time
+from sidebar import render_sidebar
+from auth_simple import check_password
+
+# AUTENTIFICARE
+if not check_password():
+    st.stop()
+
+# SIDEBAR
+render_sidebar()
 
 st.set_page_config(page_title="Produse WooCommerce & SmartBill", layout="wide")
 st.title("📦 Import Produse")

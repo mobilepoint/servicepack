@@ -1,5 +1,6 @@
 import streamlit as st
-from sidebar import render_sidebar  # Import funcția de sidebar
+from sidebar import render_sidebar
+from auth_simple import check_password
 
 # ===== CONFIGURARE PAGINĂ =====
 st.set_page_config(
@@ -9,7 +10,11 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ===== AFIȘEAZĂ SIDEBAR (VA FI VIZIBIL ÎN TOATE PAGINILE) =====
+# ===== AUTENTIFICARE - VERIFICARE ÎNAINTE DE ORICE =====
+if not check_password():
+    st.stop()
+
+# ===== AFIȘEAZĂ SIDEBAR =====
 render_sidebar()
 
 # ===== PAGINA PRINCIPALĂ =====

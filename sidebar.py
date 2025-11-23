@@ -1,6 +1,7 @@
 import streamlit as st
 import psycopg2
 from datetime import datetime
+import requests
 
 # ===== FUNCȚIE VERIFICARE CONEXIUNI =====
 @st.cache_resource
@@ -51,7 +52,6 @@ def check_all_connections():
     
     # 3. VERIFICARE SMARTBILL API
     try:
-        import requests
         from requests.auth import HTTPBasicAuth
         sb_email = st.secrets["connections"]["smartbill"]["EMAIL"]
         sb_token = st.secrets["connections"]["smartbill"]["TOKEN"]
@@ -68,31 +68,56 @@ def check_all_connections():
     except:
         pass
     
-    # 4. VERIFICARE FONEDAY API
+    # 4. VERIFICARE FONEDAY API (LOGICA DIN dashboard.py)
     try:
-        import requests
-        foneday_url = st.secrets["FONEDAY_API_URL"]
-        foneday_token = st.secrets["FONEDAY_API_TOKEN"]
+        foneday_api_url = st.secrets["FONEDAY_API_URL"]
+        foneday_api_token = st.secrets["FONEDAY_API_TOKEN"]
         
         headers = {
-            "Authorization": f"Bearer {foneday_token}",
-            "Accept": "application/json"
+            "Authorization": f"Bearer {foneday_api_token}",
+            "Content-Type": "application/json"
         }
         
-        # Test endpoint - verifică dacă API-ul răspunde
+        # Test cu endpoint /products (același ca în dashboard.py)
         response = requests.get(
-            f"{foneday_url}/products",
+            f"{foneday_api_url}/products",
             headers=headers,
             timeout=10,
-            params={"per_page": 1}
+            params={"per_page": 1}  # Doar 1 produs pentru test rapid
         )
         
-        if response.status_code in range(200, 300):
+        if response.status_code == 200:
             results["foneday"]["status"] = True
-    except:
+    except Exception as e:
+        # Log error if needed
         pass
     
     return results
+
+
+# ===== FUNCȚIE PENTRU A OBȚINE PRODUS FONEDAY (din dashboard.py) =====
+@st.cache_data(ttl=300)  # Cache 5 minute
+def get_foneday_product_by_sku(foneday_sku: str):
+    """Obține produs din Foneday după SKU-ul lor"""
+    try:
+        headers = {
+            "Authorization": f"Bearer {st.secrets['FONEDAY_API_TOKEN']}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.get(
+            f"{st.secrets['FONEDAY_API_URL']}/product/{foneday_sku}",
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return data.get("product")
+        
+        return None
+    except Exception as e:
+        return None
 
 
 # ===== FUNCȚIE VERIFICARE TIMESTAMP-URI TABELE =====
@@ -210,7 +235,7 @@ def render_sidebar():
         with col2:
             st.markdown("✅" if conn_status["smartbill"]["status"] else "❌")
         
-        # FoneDay (NOU)
+        # FoneDay (cu logica corectă din dashboard.py)
         col1, col2 = st.columns([3, 1])
         with col1:
             st.caption("📱 FoneDay")

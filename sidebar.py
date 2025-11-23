@@ -23,7 +23,7 @@ def check_all_connections():
         cursor.close()
         conn.close()
         results["postgresql"]["status"] = True
-    except Exception as e:
+    except:
         pass
     
     # 2. VERIFICARE WOOCOMMERCE API
@@ -44,7 +44,7 @@ def check_all_connections():
         response = wcapi.get("products", params={"per_page": 1})
         if response.status_code in range(200, 300):
             results["woocommerce"]["status"] = True
-    except Exception as e:
+    except:
         pass
     
     # 3. VERIFICARE SMARTBILL API
@@ -62,10 +62,10 @@ def check_all_connections():
         
         if response.status_code == 200:
             results["smartbill"]["status"] = True
-    except Exception as e:
+    except:
         pass
     
-    # 4. VERIFICARE FONEDAY API - ACUM SUB connections.foneday
+    # 4. VERIFICARE FONEDAY API
     try:
         foneday_api_url = st.secrets["connections"]["foneday"]["API_URL"]
         foneday_api_token = st.secrets["connections"]["foneday"]["API_TOKEN"]
@@ -75,7 +75,6 @@ def check_all_connections():
             "Content-Type": "application/json"
         }
         
-        # Test cu /products
         response = requests.get(
             f"{foneday_api_url}/products",
             headers=headers,
@@ -84,8 +83,7 @@ def check_all_connections():
         
         if response.status_code in range(200, 300):
             results["foneday"]["status"] = True
-            
-    except Exception as e:
+    except:
         pass
     
     return results
@@ -112,7 +110,7 @@ def get_foneday_product_by_sku(foneday_sku: str):
             return data.get("product")
         
         return None
-    except Exception as e:
+    except:
         return None
 
 
@@ -186,7 +184,7 @@ def check_table_timestamps():
                     tables[table_key]["status"] = "❓"
                     tables[table_key]["ts"] = "Coloană lipsă"
                     
-            except Exception as e:
+            except:
                 tables[table_key]["status"] = "✗"
                 tables[table_key]["ts"] = "Eroare"
         
@@ -205,19 +203,26 @@ def check_table_timestamps():
 def render_sidebar():
     """Afișează sidebar-ul compact cu statusuri"""
     with st.sidebar:
-        # === HEADER CUSTOM ===
+        # === CSS PENTRU A SCHIMBA DOAR TEXTUL "streamlit app" =====
         st.markdown("""
             <style>
-                [data-testid="stSidebarNav"] {
+                /* Ascunde doar primul element (streamlit app), NU toată navigarea */
+                section[data-testid="stSidebarNav"] > ul > li:first-child {
                     display: none;
+                }
+                
+                /* Sau schimbă textul direct */
+                section[data-testid="stSidebarNav"] > ul > li:first-child > a > span {
+                    display: none;
+                }
+                
+                section[data-testid="stSidebarNav"] > ul > li:first-child > a::before {
+                    content: "🏠 Dashboard";
+                    font-weight: 600;
                 }
             </style>
         """, unsafe_allow_html=True)
         
-        # Header personalizat
-        st.markdown("## 🏠 Dashboard")
-        st.divider()
-             
         # === CONEXIUNI API ===
         st.markdown("### 🔌 Conexiuni API")
         

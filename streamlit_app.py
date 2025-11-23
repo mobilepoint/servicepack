@@ -1,5 +1,6 @@
 import streamlit as st
-from sidebar import render_sidebar
+from datetime import datetime
+from sidebar import render_sidebar, check_all_connections, check_table_timestamps
 from auth_simple import check_password
 
 # ===== CONFIGURARE PAGINĂ =====
@@ -23,8 +24,6 @@ st.divider()
 
 # Afișare metrici generale
 col1, col2, col3, col4 = st.columns(4)
-
-from sidebar import check_all_connections, check_table_timestamps
 
 connection_status = check_all_connections()
 total_connections = sum(1 for conn in ["postgresql", "woocommerce", "smartbill", "foneday"] 
@@ -102,8 +101,6 @@ st.divider()
 # === TABELE SINCRONIZATE ===
 st.markdown("### 📊 Detalii Tabele")
 
-tables = check_table_timestamps()
-
 # Afișează tabelele într-un grid
 col1, col2 = st.columns(2)
 
@@ -115,7 +112,6 @@ with col1:
         with st.container(border=True):
             st.markdown(f"{table_info['status']} **{table_info['name']}**")
             if table_info['ts'] and table_info['status'] == "✓":
-                from datetime import datetime
                 if isinstance(table_info['ts'], datetime):
                     st.caption(f"🕐 {table_info['ts'].strftime('%d.%m.%Y %H:%M')}")
                 else:
@@ -130,7 +126,6 @@ with col2:
             with st.container(border=True):
                 st.markdown(f"{table_info['status']} **{table_info['name']}**")
                 if table_info['ts'] and table_info['status'] == "✓":
-                    from datetime import datetime
                     if isinstance(table_info['ts'], datetime):
                         st.caption(f"🕐 {table_info['ts'].strftime('%d.%m.%Y %H:%M')}")
                     else:

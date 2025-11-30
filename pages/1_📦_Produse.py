@@ -1029,7 +1029,51 @@ if st.session_state["import_session_id"] and st.session_state["import_phase"] ==
     st.rerun()
 
 if st.session_state["import_session_id"] and st.session_state["import_phase"] == 'reconciling':
-    match_stats = st.session_state["import_stats"].get('matching', {})
+    # RECALCULEAZĂ STATISTICILE DIN BAZA DE DATE
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Preia statistici din view-ul v_import_status
+        cursor.execute("SELECT * FROM v_import_status WHERE import_session_id = %s", 
+                      (st.session_state["import_session_id"],))
+        stats = cursor.fetchone()
+        
+        if stats:
+            match_stats = {
+                'total': stats[1],
+                'matched_primary': stats[2],
+                'matched_alias': stats[3],
+                'matched_remembered': stats[4],
+                'unknown': stats[5],
+                'duplicates': stats[6],
+                'errors': stats[7],
+                'pending_actions': stats[8]
+            }
+            
+            # Calculează produsele auto-create
+            cursor.execute("""
+                SELECT COUNT(*) 
+                FROM woo_staging_matched 
+                WHERE import_session_id = %s AND match_type = 'auto_created'
+            """, (st.session_state["import_session_id"],))
+            auto_created_result = cursor.fetchone()
+            match_stats['auto_created'] = auto_created_result[0] if auto_created_result else 0
+            
+            # Actualizează session_state cu valorile reale
+            st.session_state["import_stats"]['matching'] = match_stats
+        else:
+            match_stats = st.session_state["import_stats"].get('matching', {})
+            st.warning("⚠️ Nu am găsit statistici în baza de date")
+        
+        cursor.close()
+        conn.close()
+        
+    except Exception as e:
+        st.error(f"❌ Eroare citire statistici: {e}")
+        match_stats = st.session_state["import_stats"].get('matching', {})
+    
+    # Afișează metricile
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Match", match_stats.get('matched_primary', 0))
     c2.metric("Auto", match_stats.get('auto_created', 0))
@@ -1037,6 +1081,7 @@ if st.session_state["import_session_id"] and st.session_state["import_phase"] ==
     c4.metric("Dup", match_stats.get('duplicates', 0))
     
     pending = match_stats.get('pending_actions', 0)
+
     if pending == 0:
         if st.button("📦 Finalizează", type="primary"):
             st.session_state["import_phase"] = 'finalizing'

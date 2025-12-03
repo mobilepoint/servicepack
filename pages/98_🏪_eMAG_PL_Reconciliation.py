@@ -326,61 +326,248 @@ with tab1:
 # ═══════════════════════════════════════════════════════
 
 with tab2:
-    st.header("📊 Dashboard Comenzi")
+    st.header("📊 Dashboard Profit eMAG")
     
     conn = get_db_connection()
-    if conn:
-        try:
-            # Statistici generale
-            stats_db = get_db_stats(conn)
-            if stats_db:
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    st.metric("📦 Total linii", stats_db['total_lines'])
-                with col2:
-                    st.metric("🛒 Comenzi unice", stats_db['unique_orders'])
-                with col3:
-                    profit_color = "normal" if stats_db['total_profit'] >= 0 else "inverse"
-                    st.metric("💰 Profit total", f"{stats_db['total_profit']:.2f} RON", delta_color=profit_color)
-            
-            st.divider()
-            
-            # Tabel cu ultimele 20 linii
-            st.subheader("📋 Ultimele 20 comenzi")
-            
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute("""
-                SELECT 
-                    data, id_comanda, sku, produs, tip_desfasurator, cantitate,
-                    vanzari, comision, vanzari_nete, profit_net
-                FROM emag_order_lines 
-                ORDER BY data DESC, id_comanda DESC 
-                LIMIT 20
-            """)
-            rows = cursor.fetchall()
-            cursor.close()
-            
-            if rows:
-                df_display = pd.DataFrame(rows)
-                
-                # Format date
-                df_display['data'] = pd.to_datetime(df_display['data']).dt.strftime('%d/%m/%Y')
-                
-                # Format numeric
-                for col in ['vanzari', 'comision', 'vanzari_nete', 'profit_net']:
-                    if col in df_display.columns:
-                        df_display[col] = df_display[col].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "0.00")
-                
-                st.dataframe(df_display, use_container_width=True, height=600)
-            else:
-                st.warning("⚠️ Nu există date în baza de date. Upload un fișier P&L mai întâi.")
-                
-        except Exception as e:
-            st.error(f"❌ Eroare: {e}")
-        finally:
-            conn.close()
-    else:
+    if not conn:
         st.error("❌ Nu pot conecta la baza de date")
+        st.stop()
+    
+    try:
+        cursor = conn.cursor(cursor_factory=RealDictCursor)
+        
+        # ═══════════════════════════════════════════════════════
+        # STATISTICI GENERALE
+        # ═══════════════════════════════════════════════════════
+        
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_linii,
+                COUNT(DISTINCT id_comanda) as comenzi_unice,
+                COUNT(CASE WHEN pret_intrare IS NOT NULL THEN 1 END) as cu_pret_intrare,
+                COUNT(CASE WHEN pret_intrare IS NULL THEN 1 END) as fara_pret_intrare,
+                ROUND(SUM(vanzari), 2) as total_vanzari,
+                ROUND(SUM(comision), 2) as total_comision,
+                ROUND(SUM(vanzari_nete), 2) as total_vanzari_nete,
+                ROUND(SUM(CASE WHEN pret_intrare IS NOT NULL 
+                          THEN profit_net ELSE vanzari_nete END), 2) as total_profit,
+                ROUND(SUM(CASE WHEN pret_intrare IS NOT NULL 
+                          THEN pret_intrare * cantitate ELSE 0 END), 2) as total_costuri
+            FROM emag_order_lines
+        """)
+        stats = cursor.fetchone()
+        
+        # Metrici principale
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric(
+                "💰 Total Vânzări", 
+                f"{stats['total_vanzari']:,.2f} RON",
+                help="Suma totală încasată (cu taxe)"
+            )
+        
+        with col2:
+            st.metric(
+                "💸 Comisioane eMAG", 
+                f"{stats['total_comision']:,.2f} RON",
+                delta=f"-{(stats['total_comision']/stats['total_vanzari']*100):.1f}%",
+                delta_color="inverse",
+                help="Total comisioane plătite către eMAG"
+            )
+        
+        with col3:
+            st.metric(
+                "📦 Costuri Produse", 
+                f"{stats['total_costuri']:,.2f} RON",
+                delta=f"-{(stats['total_costuri']/stats['total_vanzari']*100):.1f}%",
+                delta_color="inverse",
+                help="Cost de achiziție produse (din SmartBill)"
+            )
+        
+        with col4:
+            profit_color = "normal" if stats['total_profit'] >= 0 else "inverse"
+            marja = (stats['total_profit'] / stats['total_vanzari'] * 100) if stats['total_vanzari'] > 0 else 0
+            st.metric(
+                "✨ Profit Net", 
+                f"{stats['total_profit']:,.2f} RON",
+                delta=f"{marja:.1f}% marjă",
+                delta_color=profit_color,
+                help="Profit real = Vânzări - Comisioane - Costuri"
+            )
+        
+        st.divider()
+        
+        # Status match cu SmartBill
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            st.metric("📦 Total Comenzi", stats['total_linii'])
+        
+        with col2:
+            procent_match = (stats['cu_pret_intrare'] / stats['total_linii'] * 100) if stats['total_linii'] > 0 else 0
+            st.metric(
+                "✅ Cu Preț Intrare", 
+                stats['cu_pret_intrare'],
+                delta=f"{procent_match:.1f}%",
+                help="Comenzi cu match în SmartBill"
+            )
+        
+        with col3:
+            st.metric(
+                "⚠️ Fără Preț Intrare", 
+                stats['fara_pret_intrare'],
+                delta_color="inverse",
+                help="Comenzi fără preț în SmartBill"
+            )
+        
+        st.divider()
+        
+        # ═══════════════════════════════════════════════════════
+        # FILTRE
+        # ═══════════════════════════════════════════════════════
+        
+        st.subheader("🔍 Filtre & Vizualizare")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # Filtru dată
+            cursor.execute("SELECT MIN(data) as min_date, MAX(data) as max_date FROM emag_order_lines")
+            date_range = cursor.fetchone()
+            
+            if date_range['min_date']:
+                date_filter = st.date_input(
+                    "Perioada",
+                    value=(date_range['min_date'], date_range['max_date']),
+                    min_value=date_range['min_date'],
+                    max_value=date_range['max_date'],
+                    format="DD/MM/YYYY"
+                )
+            else:
+                date_filter = None
+        
+        with col2:
+            status_filter = st.selectbox(
+                "Status Preț",
+                ["Toate", "Cu preț intrare", "Fără preț intrare"]
+            )
+        
+        with col3:
+            sort_by = st.selectbox(
+                "Sortare după",
+                ["Profit (desc)", "Profit (asc)", "Data (desc)", "Data (asc)", "Vânzări (desc)"]
+            )
+        
+        # ═══════════════════════════════════════════════════════
+        # CONSTRUIRE QUERY CU FILTRE
+        # ═══════════════════════════════════════════════════════
+        
+        where_clauses = []
+        params = []
+        
+        if date_filter and len(date_filter) == 2:
+            where_clauses.append("data BETWEEN %s AND %s")
+            params.extend([date_filter[0], date_filter[1]])
+        
+        if status_filter == "Cu preț intrare":
+            where_clauses.append("pret_intrare IS NOT NULL")
+        elif status_filter == "Fără preț intrare":
+            where_clauses.append("pret_intrare IS NULL")
+        
+        where_sql = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+        
+        # Sortare
+        sort_mapping = {
+            "Profit (desc)": "profit_net DESC NULLS LAST",
+            "Profit (asc)": "profit_net ASC NULLS LAST",
+            "Data (desc)": "data DESC",
+            "Data (asc)": "data ASC",
+            "Vânzări (desc)": "vanzari DESC"
+        }
+        order_sql = sort_mapping.get(sort_by, "data DESC")
+        
+        # ═══════════════════════════════════════════════════════
+        # QUERY COMENZI
+        # ═══════════════════════════════════════════════════════
+        
+        query = f"""
+            SELECT 
+                data,
+                id_comanda,
+                sku,
+                LEFT(produs, 50) as produs,
+                brand,
+                tip_desfasurator,
+                cantitate,
+                ROUND(vanzari, 2) as vanzari,
+                ROUND(comision, 2) as comision,
+                ROUND(pret_intrare, 2) as pret_intrare,
+                ROUND(vanzari_nete, 2) as vanzari_nete,
+                ROUND(profit_net, 2) as profit_net,
+                CASE 
+                    WHEN pret_intrare IS NOT NULL AND vanzari_nete > 0 
+                    THEN ROUND((profit_net / vanzari_nete) * 100, 1)
+                    ELSE NULL 
+                END as marja_procent
+            FROM emag_order_lines
+            {where_sql}
+            ORDER BY {order_sql}
+            LIMIT 100
+        """
+        
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        if rows:
+            df_display = pd.DataFrame(rows)
+            
+            # Format data
+            df_display['data'] = pd.to_datetime(df_display['data']).dt.strftime('%d/%m/%Y')
+            
+            # Colorare condiționată pentru profit
+            def highlight_profit(row):
+                if pd.notnull(row['profit_net']):
+                    if row['profit_net'] < 0:
+                        return ['background-color: #ffe6e6'] * len(row)  # Roșu deschis
+                    elif row['profit_net'] > 50:
+                        return ['background-color: #e6ffe6'] * len(row)  # Verde deschis
+                return [''] * len(row)
+            
+            st.dataframe(
+                df_display,
+                use_container_width=True,
+                height=600,
+                column_config={
+                    "data": st.column_config.TextColumn("Data", width="small"),
+                    "id_comanda": st.column_config.NumberColumn("ID Comandă", format="%d"),
+                    "sku": st.column_config.TextColumn("SKU", width="medium"),
+                    "produs": st.column_config.TextColumn("Produs", width="large"),
+                    "brand": st.column_config.TextColumn("Brand", width="small"),
+                    "tip_desfasurator": st.column_config.TextColumn("Tip", width="small"),
+                    "cantitate": st.column_config.NumberColumn("Cant.", format="%d"),
+                    "vanzari": st.column_config.NumberColumn("Vânzări", format="%.2f RON"),
+                    "comision": st.column_config.NumberColumn("Comision", format="%.2f RON"),
+                    "pret_intrare": st.column_config.NumberColumn("Preț Intrare", format="%.2f RON"),
+                    "vanzari_nete": st.column_config.NumberColumn("Vânzări Nete", format="%.2f RON"),
+                    "profit_net": st.column_config.NumberColumn("Profit Net", format="%.2f RON"),
+                    "marja_procent": st.column_config.NumberColumn("Marjă %", format="%.1f%%"),
+                }
+            )
+            
+            st.caption(f"📊 Afișate primele 100 comenzi din {len(rows)} găsite")
+            
+        else:
+            st.warning("⚠️ Nu există date pentru filtrele selectate")
+        
+        cursor.close()
+        
+    except Exception as e:
+        st.error(f"❌ Eroare: {e}")
+        st.exception(e)
+    finally:
+        conn.close()
+
 
 # ═══════════════════════════════════════════════════════
 # TAB 3: RECONCILIERE

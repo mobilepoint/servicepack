@@ -1,7 +1,17 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
-from supabase import create_client, Client
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import sys
+import os
+
+# Import autentificare (dacă există)
+try:
+    from auth_simple import check_password
+    HAS_AUTH = True
+except ImportError:
+    HAS_AUTH = False
 
 # ═══════════════════════════════════════════════════════
 # CONFIGURARE PAGINĂ
@@ -14,16 +24,148 @@ st.set_page_config(
 )
 
 # ═══════════════════════════════════════════════════════
-# CONEXIUNE SUPABASE
+# AUTENTIFICARE
+# ═══════════════════════════════════════════════════════
+
+if HAS_AUTH:
+    if not check_password():
+        st.stop()
+
+# ═══════════════════════════════════════════════════════
+# CONEXIUNE POSTGRESQL
 # ═══════════════════════════════════════════════════════
 
 @st.cache_resource
-def init_supabase():
-    url = st.secrets["SUPABASE_URL"]
-    key = st.secrets["SUPABASE_KEY"]
-    return create_client(url, key)
+def get_db_connection():
+    """Conexiune la PostgreSQL folosind secrets"""
+    try:
+        pg_url = st.secrets["connections"]["postgresql"]["url"]
+        conn = psycopg2.connect(pg_url, connect_timeout=10)
+        return conn
+    except Exception as e:
+        st.error(f"❌ Eroare conexiune DB: {e}")
+        return None
 
-supabase = init_supabase()
+# ═══════════════════════════════════════════════════════
+# FUNCȚII HELPER
+# ═══════════════════════════════════════════════════════
+
+def parse_excel_pl(df):
+    """Parse Excel P&L și pregătește datele pentru insert"""
+    column_mapping = {
+        'Data': 'data',
+        'Seller': 'seller',
+        'ID comanda': 'id_comanda',
+        'ID produs': 'id_produs',
+        'EAN': 'ean',
+        'Cod produs (PN)': 'sku',
+        'PNK': 'pnk',
+        'Brand': 'brand',
+        'Produs': 'produs',
+        'Tip desfasurator': 'tip_desfasurator',
+        'Cantitate': 'cantitate',
+        'Vanzari': 'vanzari',
+        'Taxa livrare': 'taxa_livrare',
+        'Taxa retur': 'taxa_retur',
+        'Valoare retinuta': 'valoare_retinuta',
+        'Comision': 'comision',
+        'Comision anulate': 'comision_anulate',
+        'Comision taxa livrare': 'comision_taxa_livrare',
+        'Depozitare FBE': 'depozitare_fbe',
+        'Operatiuni FBE': 'operatiuni_fbe',
+        'Cost livrare': 'cost_livrare',
+        'Cost retur': 'cost_retur',
+        'Vanzari nete': 'vanzari_nete'
+    }
+    
+    df_clean = df.rename(columns=column_mapping)
+    df_clean['data'] = pd.to_datetime(df_clean['data'], format='%d/%m/%Y', errors='coerce')
+    
+    numeric_cols = [
+        'id_comanda', 'id_produs', 'cantitate',
+        'vanzari', 'taxa_livrare', 'taxa_retur', 'valoare_retinuta',
+        'comision', 'comision_anulate', 'comision_taxa_livrare',
+        'depozitare_fbe', 'operatiuni_fbe', 'cost_livrare', 'cost_retur',
+        'vanzari_nete'
+    ]
+    
+    for col in numeric_cols:
+        if col in df_clean.columns:
+            df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
+    
+    df_clean = df_clean.where(pd.notnull(df_clean), None)
+    return df_clean
+
+
+def upsert_order_line(conn, row, batch_id, file_name):
+    """Insert sau Update o linie în DB folosind PostgreSQL UPSERT"""
+    cursor = conn.cursor()
+    
+    try:
+        sql = """
+            INSERT INTO emag_order_lines (
+                data, seller, id_comanda, id_produs, ean, sku, pnk, brand, produs,
+                tip_desfasurator, cantitate,
+                vanzari, taxa_livrare, taxa_retur, valoare_retinuta,
+                comision, comision_anulate, comision_taxa_livrare,
+                depozitare_fbe, operatiuni_fbe, cost_livrare, cost_retur,
+                vanzari_nete, profit_net,
+                upload_batch_id, excel_source_file, last_seen_at
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW()
+            )
+            ON CONFLICT (id_comanda, tip_desfasurator)
+            DO UPDATE SET
+                vanzari = EXCLUDED.vanzari,
+                comision = EXCLUDED.comision,
+                vanzari_nete = EXCLUDED.vanzari_nete,
+                profit_net = EXCLUDED.profit_net,
+                upload_batch_id = EXCLUDED.upload_batch_id,
+                last_seen_at = NOW()
+            WHERE 
+                emag_order_lines.vanzari IS DISTINCT FROM EXCLUDED.vanzari OR
+                emag_order_lines.comision IS DISTINCT FROM EXCLUDED.comision
+        """
+        
+        values = (
+            row['data'].strftime('%Y-%m-%d') if pd.notnull(row['data']) else None,
+            row.get('seller'),
+            int(row['id_comanda']) if pd.notnull(row['id_comanda']) else None,
+            int(row['id_produs']) if pd.notnull(row['id_produs']) else None,
+            str(row.get('ean')) if pd.notnull(row.get('ean')) else None,
+            str(row.get('sku')) if pd.notnull(row.get('sku')) else None,
+            row.get('pnk'),
+            row.get('brand'),
+            row.get('produs'),
+            row.get('tip_desfasurator'),
+            int(row['cantitate']) if pd.notnull(row['cantitate']) else 0,
+            float(row['vanzari']) if pd.notnull(row['vanzari']) else 0.0,
+            float(row['taxa_livrare']) if pd.notnull(row['taxa_livrare']) else 0.0,
+            float(row['taxa_retur']) if pd.notnull(row['taxa_retur']) else 0.0,
+            float(row['valoare_retinuta']) if pd.notnull(row['valoare_retinuta']) else 0.0,
+            float(row['comision']) if pd.notnull(row['comision']) else 0.0,
+            float(row['comision_anulate']) if pd.notnull(row['comision_anulate']) else 0.0,
+            float(row['comision_taxa_livrare']) if pd.notnull(row['comision_taxa_livrare']) else 0.0,
+            float(row['depozitare_fbe']) if pd.notnull(row['depozitare_fbe']) else 0.0,
+            float(row['operatiuni_fbe']) if pd.notnull(row['operatiuni_fbe']) else 0.0,
+            float(row['cost_livrare']) if pd.notnull(row['cost_livrare']) else 0.0,
+            float(row['cost_retur']) if pd.notnull(row['cost_retur']) else 0.0,
+            float(row['vanzari_nete']) if pd.notnull(row['vanzari_nete']) else 0.0,
+            float(row['vanzari_nete']) if pd.notnull(row['vanzari_nete']) else 0.0,  # profit_net
+            batch_id,
+            file_name
+        )
+        
+        cursor.execute(sql, values)
+        conn.commit()
+        cursor.close()
+        return True
+        
+    except Exception as e:
+        conn.rollback()
+        cursor.close()
+        raise e
 
 # ═══════════════════════════════════════════════════════
 # HEADER PRINCIPAL
@@ -58,99 +200,6 @@ with tab1:
     3. Aplicația va procesa automat și va evita duplicatele
     """)
     
-    # ═══════════════════════════════════════
-    # FUNCȚII HELPER PENTRU UPLOAD
-    # ═══════════════════════════════════════
-    
-    def parse_excel_pl(df):
-        """Parse Excel P&L și pregătește datele pentru insert"""
-        column_mapping = {
-            'Data': 'data',
-            'Seller': 'seller',
-            'ID comanda': 'id_comanda',
-            'ID produs': 'id_produs',
-            'EAN': 'ean',
-            'Cod produs (PN)': 'sku',
-            'PNK': 'pnk',
-            'Brand': 'brand',
-            'Produs': 'produs',
-            'Tip desfasurator': 'tip_desfasurator',
-            'Cantitate': 'cantitate',
-            'Vanzari': 'vanzari',
-            'Taxa livrare': 'taxa_livrare',
-            'Taxa retur': 'taxa_retur',
-            'Valoare retinuta': 'valoare_retinuta',
-            'Comision': 'comision',
-            'Comision anulate': 'comision_anulate',
-            'Comision taxa livrare': 'comision_taxa_livrare',
-            'Depozitare FBE': 'depozitare_fbe',
-            'Operatiuni FBE': 'operatiuni_fbe',
-            'Cost livrare': 'cost_livrare',
-            'Cost retur': 'cost_retur',
-            'Vanzari nete': 'vanzari_nete'
-        }
-        
-        df_clean = df.rename(columns=column_mapping)
-        df_clean['data'] = pd.to_datetime(df_clean['data'], format='%d/%m/%Y', errors='coerce')
-        
-        numeric_cols = [
-            'id_comanda', 'id_produs', 'cantitate',
-            'vanzari', 'taxa_livrare', 'taxa_retur', 'valoare_retinuta',
-            'comision', 'comision_anulate', 'comision_taxa_livrare',
-            'depozitare_fbe', 'operatiuni_fbe', 'cost_livrare', 'cost_retur',
-            'vanzari_nete'
-        ]
-        
-        for col in numeric_cols:
-            if col in df_clean.columns:
-                df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
-        
-        df_clean = df_clean.where(pd.notnull(df_clean), None)
-        return df_clean
-    
-    
-    def upsert_order_line(row, batch_id, file_name):
-        """Insert sau Update o linie în DB"""
-        data_dict = {
-            'data': row['data'].strftime('%Y-%m-%d') if pd.notnull(row['data']) else None,
-            'seller': row.get('seller'),
-            'id_comanda': int(row['id_comanda']) if pd.notnull(row['id_comanda']) else None,
-            'id_produs': int(row['id_produs']) if pd.notnull(row['id_produs']) else None,
-            'ean': str(row.get('ean')) if pd.notnull(row.get('ean')) else None,
-            'sku': str(row.get('sku')) if pd.notnull(row.get('sku')) else None,
-            'pnk': row.get('pnk'),
-            'brand': row.get('brand'),
-            'produs': row.get('produs'),
-            'tip_desfasurator': row.get('tip_desfasurator'),
-            'cantitate': int(row['cantitate']) if pd.notnull(row['cantitate']) else 0,
-            'vanzari': float(row['vanzari']) if pd.notnull(row['vanzari']) else 0.0,
-            'taxa_livrare': float(row['taxa_livrare']) if pd.notnull(row['taxa_livrare']) else 0.0,
-            'taxa_retur': float(row['taxa_retur']) if pd.notnull(row['taxa_retur']) else 0.0,
-            'valoare_retinuta': float(row['valoare_retinuta']) if pd.notnull(row['valoare_retinuta']) else 0.0,
-            'comision': float(row['comision']) if pd.notnull(row['comision']) else 0.0,
-            'comision_anulate': float(row['comision_anulate']) if pd.notnull(row['comision_anulate']) else 0.0,
-            'comision_taxa_livrare': float(row['comision_taxa_livrare']) if pd.notnull(row['comision_taxa_livrare']) else 0.0,
-            'depozitare_fbe': float(row['depozitare_fbe']) if pd.notnull(row['depozitare_fbe']) else 0.0,
-            'operatiuni_fbe': float(row['operatiuni_fbe']) if pd.notnull(row['operatiuni_fbe']) else 0.0,
-            'cost_livrare': float(row['cost_livrare']) if pd.notnull(row['cost_livrare']) else 0.0,
-            'cost_retur': float(row['cost_retur']) if pd.notnull(row['cost_retur']) else 0.0,
-            'vanzari_nete': float(row['vanzari_nete']) if pd.notnull(row['vanzari_nete']) else 0.0,
-            'profit_net': float(row['vanzari_nete']) if pd.notnull(row['vanzari_nete']) else 0.0,
-            'upload_batch_id': batch_id,
-            'excel_source_file': file_name
-        }
-        
-        response = supabase.table('emag_order_lines').upsert(
-            data_dict,
-            on_conflict='id_comanda,tip_desfasurator'
-        ).execute()
-        
-        return response
-    
-    # ═══════════════════════════════════════
-    # UI UPLOAD
-    # ═══════════════════════════════════════
-    
     uploaded_file = st.file_uploader(
         "Selectează fișierul Excel P&L",
         type=['xlsx', 'xls'],
@@ -163,6 +212,12 @@ with tab1:
         if st.button("🚀 Procesează și Upload în Baza de Date", type="primary"):
             progress_bar = st.progress(0)
             status_text = st.empty()
+            
+            # Verifică conexiune DB
+            conn = get_db_connection()
+            if conn is None:
+                st.error("❌ Nu pot conecta la baza de date. Verifică secrets!")
+                st.stop()
             
             try:
                 status_text.text("📖 Citesc fișierul Excel...")
@@ -190,7 +245,7 @@ with tab1:
                 
                 for index, row in df_clean.iterrows():
                     try:
-                        upsert_order_line(row, batch_id, uploaded_file.name)
+                        upsert_order_line(conn, row, batch_id, uploaded_file.name)
                         stats['success'] += 1
                         progress = 20 + int((index / total_rows) * 70)
                         progress_bar.progress(progress)
@@ -227,6 +282,9 @@ with tab1:
             except Exception as e:
                 st.error(f"❌ Eroare la procesare: {e}")
                 st.exception(e)
+            finally:
+                if conn:
+                    conn.close()
 
 # ═══════════════════════════════════════════════════════
 # TAB 2: DASHBOARD
@@ -236,17 +294,24 @@ with tab2:
     st.header("📊 Dashboard Comenzi")
     st.info("🚧 **În dezvoltare** - Aici vei vedea toate comenzile și profitul")
     
-    # Placeholder pentru viitor
-    try:
-        result = supabase.table('emag_order_lines').select('*', count='exact').limit(10).execute()
-        
-        if result.data:
-            st.success(f"✅ Găsite {len(result.data)} linii în DB")
-            st.dataframe(result.data)
-        else:
-            st.warning("⚠️ Nu există date în baza de date. Upload un fișier P&L mai întâi.")
-    except Exception as e:
-        st.error(f"❌ Eroare: {e}")
+    conn = get_db_connection()
+    if conn:
+        try:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            cursor.execute("SELECT * FROM emag_order_lines ORDER BY data DESC LIMIT 10")
+            rows = cursor.fetchall()
+            cursor.close()
+            conn.close()
+            
+            if rows:
+                st.success(f"✅ Găsite {len(rows)} linii în DB (ultimele 10)")
+                df_display = pd.DataFrame(rows)
+                st.dataframe(df_display, use_container_width=True)
+            else:
+                st.warning("⚠️ Nu există date în baza de date. Upload un fișier P&L mai întâi.")
+        except Exception as e:
+            st.error(f"❌ Eroare: {e}")
+            conn.close()
 
 # ═══════════════════════════════════════════════════════
 # TAB 3: RECONCILIERE

@@ -3,8 +3,6 @@ import pandas as pd
 from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
-import sys
-import os
 
 # Import autentificare (dacă există)
 try:
@@ -79,8 +77,11 @@ def parse_excel_pl(df):
     }
     
     df_clean = df.rename(columns=column_mapping)
+    
+    # Convertește data (format DD/MM/YYYY)
     df_clean['data'] = pd.to_datetime(df_clean['data'], format='%d/%m/%Y', errors='coerce')
     
+    # Convertește numeric
     numeric_cols = [
         'id_comanda', 'id_produs', 'cantitate',
         'vanzari', 'taxa_livrare', 'taxa_retur', 'valoare_retinuta',
@@ -93,7 +94,9 @@ def parse_excel_pl(df):
         if col in df_clean.columns:
             df_clean[col] = pd.to_numeric(df_clean[col], errors='coerce')
     
+    # Replace NaN cu None (pentru NULL în DB)
     df_clean = df_clean.where(pd.notnull(df_clean), None)
+    
     return df_clean
 
 
@@ -152,7 +155,7 @@ def upsert_order_line(conn, row, batch_id, file_name):
             float(row['cost_livrare']) if pd.notnull(row['cost_livrare']) else 0.0,
             float(row['cost_retur']) if pd.notnull(row['cost_retur']) else 0.0,
             float(row['vanzari_nete']) if pd.notnull(row['vanzari_nete']) else 0.0,
-            float(row['vanzari_nete']) if pd.notnull(row['vanzari_nete']) else 0.0,  # profit_net
+            float(row['vanzari_nete']) if pd.notnull(row['vanzari_nete']) else 0.0,  # profit_net = vanzari_nete pentru moment
             batch_id,
             file_name
         )
@@ -166,6 +169,36 @@ def upsert_order_line(conn, row, batch_id, file_name):
         conn.rollback()
         cursor.close()
         raise e
+
+
+def get_db_stats(conn):
+    """Obține statistici din baza de date"""
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    try:
+        # Total linii
+        cursor.execute("SELECT COUNT(*) as total FROM emag_order_lines")
+        total = cursor.fetchone()['total']
+        
+        # Comenzi unice
+        cursor.execute("SELECT COUNT(DISTINCT id_comanda) as unique_orders FROM emag_order_lines")
+        unique_orders = cursor.fetchone()['unique_orders']
+        
+        # Profit total
+        cursor.execute("SELECT SUM(profit_net) as total_profit FROM emag_order_lines")
+        result = cursor.fetchone()
+        total_profit = result['total_profit'] if result['total_profit'] else 0
+        
+        cursor.close()
+        
+        return {
+            'total_lines': total,
+            'unique_orders': unique_orders,
+            'total_profit': total_profit
+        }
+    except:
+        cursor.close()
+        return None
 
 # ═══════════════════════════════════════════════════════
 # HEADER PRINCIPAL
@@ -199,6 +232,22 @@ with tab1:
     2. Upload fișierul Excel aici
     3. Aplicația va procesa automat și va evita duplicatele
     """)
+    
+    # Statistici DB curente
+    conn_stats = get_db_connection()
+    if conn_stats:
+        stats_db = get_db_stats(conn_stats)
+        if stats_db:
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total linii în DB", stats_db['total_lines'])
+            with col2:
+                st.metric("Comenzi unice", stats_db['unique_orders'])
+            with col3:
+                st.metric("Profit total", f"{stats_db['total_profit']:.2f} RON")
+        conn_stats.close()
+    
+    st.divider()
     
     uploaded_file = st.file_uploader(
         "Selectează fișierul Excel P&L",
@@ -279,6 +328,9 @@ with tab1:
                 
                 st.info("👉 Mergi la tab-ul **Dashboard** pentru a vedea datele procesate")
                 
+                # Clear cache pentru a refresh statisticile
+                st.cache_data.clear()
+                
             except Exception as e:
                 st.error(f"❌ Eroare la procesare: {e}")
                 st.exception(e)
@@ -292,26 +344,60 @@ with tab1:
 
 with tab2:
     st.header("📊 Dashboard Comenzi")
-    st.info("🚧 **În dezvoltare** - Aici vei vedea toate comenzile și profitul")
     
     conn = get_db_connection()
     if conn:
         try:
+            # Statistici generale
+            stats_db = get_db_stats(conn)
+            if stats_db:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("📦 Total linii", stats_db['total_lines'])
+                with col2:
+                    st.metric("🛒 Comenzi unice", stats_db['unique_orders'])
+                with col3:
+                    profit_color = "normal" if stats_db['total_profit'] >= 0 else "inverse"
+                    st.metric("💰 Profit total", f"{stats_db['total_profit']:.2f} RON", delta_color=profit_color)
+            
+            st.divider()
+            
+            # Tabel cu ultimele 20 linii
+            st.subheader("📋 Ultimele 20 comenzi")
+            
             cursor = conn.cursor(cursor_factory=RealDictCursor)
-            cursor.execute("SELECT * FROM emag_order_lines ORDER BY data DESC LIMIT 10")
+            cursor.execute("""
+                SELECT 
+                    data, id_comanda, sku, produs, tip_desfasurator, cantitate,
+                    vanzari, comision, vanzari_nete, profit_net
+                FROM emag_order_lines 
+                ORDER BY data DESC, id_comanda DESC 
+                LIMIT 20
+            """)
             rows = cursor.fetchall()
             cursor.close()
-            conn.close()
             
             if rows:
-                st.success(f"✅ Găsite {len(rows)} linii în DB (ultimele 10)")
                 df_display = pd.DataFrame(rows)
-                st.dataframe(df_display, use_container_width=True)
+                
+                # Format date
+                df_display['data'] = pd.to_datetime(df_display['data']).dt.strftime('%d/%m/%Y')
+                
+                # Format numeric
+                for col in ['vanzari', 'comision', 'vanzari_nete', 'profit_net']:
+                    if col in df_display.columns:
+                        df_display[col] = df_display[col].apply(lambda x: f"{x:.2f}" if pd.notnull(x) else "0.00")
+                
+                st.dataframe(df_display, use_container_width=True, height=600)
             else:
                 st.warning("⚠️ Nu există date în baza de date. Upload un fișier P&L mai întâi.")
+                
         except Exception as e:
             st.error(f"❌ Eroare: {e}")
+        finally:
             conn.close()
+    else:
+        st.error("❌ Nu pot conecta la baza de date")
 
 # ═══════════════════════════════════════════════════════
 # TAB 3: RECONCILIERE
@@ -320,6 +406,19 @@ with tab2:
 with tab3:
     st.header("💰 Reconciliere Avize Plată")
     st.info("🚧 **În dezvoltare** - Aici vei face matching cu avizele de plată")
+    
+    st.markdown("""
+    ### Funcționalitate viitoare:
+    
+    1. **Upload aviz plată** (PDF sau Excel)
+    2. **Parse automat** linii aviz:
+       - Facturi comisioane (C-MKTP)
+       - Vouchere (V-MKTP)
+       - Încasări COD/Card
+    3. **Match cu P&L** consolidat
+    4. **Verificare**: Total aviz = Sum(Profit net) din P&L
+    5. **Alertă diferențe** dacă nu se potrivește
+    """)
 
 # ═══════════════════════════════════════════════════════
 # TAB 4: RAPOARTE
@@ -328,3 +427,13 @@ with tab3:
 with tab4:
     st.header("📈 Rapoarte Profit")
     st.info("🚧 **În dezvoltare** - Aici vei genera rapoarte financiare")
+    
+    st.markdown("""
+    ### Funcționalitate viitoare:
+    
+    1. **Raport profit lunar** - Profit per lună
+    2. **Raport per produs** - Top produse profitabile
+    3. **Raport comenzi stornate** - Impact retururi
+    4. **Export PDF/Excel** - Rapoarte descărcabile
+    5. **Grafice** - Vizualizare trends
+    """)

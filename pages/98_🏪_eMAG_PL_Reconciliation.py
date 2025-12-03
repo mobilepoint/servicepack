@@ -570,25 +570,342 @@ with tab2:
 
 
 # ═══════════════════════════════════════════════════════
-# TAB 3: RECONCILIERE
+# TAB 3: RECONCILIERE AVIZE
 # ═══════════════════════════════════════════════════════
 
 with tab3:
-    st.header("💰 Reconciliere Avize Plată")
-    st.info("🚧 **În dezvoltare** - Aici vei face matching cu avizele de plată")
+    st.header("💰 Reconciliere Avize Plată eMAG")
     
-    st.markdown("""
-    ### Funcționalitate viitoare:
-    
-    1. **Upload aviz plată** (PDF sau Excel)
-    2. **Parse automat** linii aviz:
-       - Facturi comisioane (C-MKTP)
-       - Vouchere (V-MKTP)
-       - Încasări COD/Card
-    3. **Match cu P&L** consolidat
-    4. **Verificare**: Total aviz = Sum(Profit net) din P&L
-    5. **Alertă diferențe** dacă nu se potrivește
+    st.info("""
+    **Cum funcționează:**
+    1. Upload avizul de plată (PDF/Excel) primit de la eMAG
+    2. Aplicația extrage automat suma totală și perioada
+    3. Calculează suma așteptată din P&L pentru aceeași perioadă
+    4. Afișează diferențele (dacă există)
     """)
+    
+    # ═══════════════════════════════════════════════════════
+    # UPLOAD AVIZ
+    # ═══════════════════════════════════════════════════════
+    
+    uploaded_aviz = st.file_uploader(
+        "📄 Selectează Avizul de Plată",
+        type=['pdf', 'xlsx', 'xls', 'csv'],
+        help="Acceptăm PDF sau Excel de la eMAG"
+    )
+    
+    if uploaded_aviz:
+        st.success(f"✅ Fișier încărcat: **{uploaded_aviz.name}**")
+        
+        # ═══════════════════════════════════════════════════════
+        # INTRODUCERE MANUALĂ DATE AVIZ
+        # ═══════════════════════════════════════════════════════
+        
+        st.divider()
+        st.subheader("📋 Detalii Aviz")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            aviz_number = st.text_input(
+                "Număr Aviz",
+                placeholder="Ex: 36898183",
+                help="Numărul avizului de plată"
+            )
+            
+            suma_aviz = st.number_input(
+                "💰 Suma Totală din Aviz (RON)",
+                min_value=-100000.0,
+                max_value=100000.0,
+                value=0.0,
+                step=0.01,
+                format="%.2f",
+                help="Suma finală din aviz (poate fi pozitivă sau negativă)"
+            )
+        
+        with col2:
+            perioada_start = st.date_input(
+                "📅 Perioada Start",
+                help="Prima zi din perioada avizului"
+            )
+            
+            perioada_end = st.date_input(
+                "📅 Perioada End",
+                help="Ultima zi din perioada avizului"
+            )
+        
+        st.divider()
+        
+        # ═══════════════════════════════════════════════════════
+        # DETALII LINII AVIZ (OPȚIONAL)
+        # ═══════════════════════════════════════════════════════
+        
+        with st.expander("📝 Detalii Linii Aviz (opțional - pentru analiză detaliată)"):
+            st.caption("Dacă vrei verificare detaliată, introdu sumele din aviz:")
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                incasari_aviz = st.number_input(
+                    "➕ Încasări Comenzi",
+                    min_value=0.0,
+                    value=0.0,
+                    step=0.01,
+                    format="%.2f"
+                )
+                
+                comisioane_aviz = st.number_input(
+                    "➖ Comisioane eMAG",
+                    min_value=0.0,
+                    value=0.0,
+                    step=0.01,
+                    format="%.2f"
+                )
+            
+            with col2:
+                vouchere_aviz = st.number_input(
+                    "➖ Vouchere",
+                    min_value=0.0,
+                    value=0.0,
+                    step=0.01,
+                    format="%.2f"
+                )
+                
+                taxe_livrare_aviz = st.number_input(
+                    "➖ Taxe Livrare",
+                    min_value=0.0,
+                    value=0.0,
+                    step=0.01,
+                    format="%.2f"
+                )
+            
+            with col3:
+                taxe_retur_aviz = st.number_input(
+                    "➖ Taxe Retur",
+                    min_value=0.0,
+                    value=0.0,
+                    step=0.01,
+                    format="%.2f"
+                )
+                
+                altele_aviz = st.number_input(
+                    "➖ Altele (ajustări)",
+                    min_value=0.0,
+                    value=0.0,
+                    step=0.01,
+                    format="%.2f"
+                )
+        
+        # ═══════════════════════════════════════════════════════
+        # BUTON RECONCILIERE
+        # ═══════════════════════════════════════════════════════
+        
+        if st.button("🔍 Reconciliază cu P&L", type="primary"):
+            
+            if not aviz_number or suma_aviz == 0:
+                st.warning("⚠️ Te rog completează Număr Aviz și Suma Totală")
+                st.stop()
+            
+            if not perioada_start or not perioada_end:
+                st.warning("⚠️ Te rog selectează perioada avizului")
+                st.stop()
+            
+            if perioada_end < perioada_start:
+                st.error("❌ Perioada End trebuie să fie după Perioada Start")
+                st.stop()
+            
+            # ═══════════════════════════════════════════════════════
+            # CALCUL DIN P&L
+            # ═══════════════════════════════════════════════════════
+            
+            conn = get_db_connection()
+            if not conn:
+                st.error("❌ Nu pot conecta la baza de date")
+                st.stop()
+            
+            try:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                
+                st.info(f"🔄 Calculez din P&L pentru perioada: {perioada_start.strftime('%d/%m/%Y')} - {perioada_end.strftime('%d/%m/%Y')}...")
+                
+                cursor.execute("""
+                    SELECT 
+                        COUNT(*) as nr_comenzi,
+                        COUNT(DISTINCT id_comanda) as comenzi_unice,
+                        SUM(cantitate) as total_bucati,
+                        ROUND(SUM(vanzari), 2) as total_vanzari,
+                        ROUND(SUM(taxa_livrare), 2) as total_taxa_livrare,
+                        ROUND(SUM(taxa_retur), 2) as total_taxa_retur,
+                        ROUND(SUM(valoare_retinuta), 2) as total_valoare_retinuta,
+                        ROUND(SUM(comision), 2) as total_comision,
+                        ROUND(SUM(comision_anulate), 2) as total_comision_anulate,
+                        ROUND(SUM(comision_taxa_livrare), 2) as total_comision_taxa_livrare,
+                        ROUND(SUM(depozitare_fbe), 2) as total_depozitare_fbe,
+                        ROUND(SUM(operatiuni_fbe), 2) as total_operatiuni_fbe,
+                        ROUND(SUM(cost_livrare), 2) as total_cost_livrare,
+                        ROUND(SUM(cost_retur), 2) as total_cost_retur,
+                        ROUND(SUM(vanzari_nete), 2) as total_vanzari_nete
+                    FROM emag_order_lines
+                    WHERE data BETWEEN %s AND %s
+                """, (perioada_start, perioada_end))
+                
+                pl_data = cursor.fetchone()
+                cursor.close()
+                conn.close()
+                
+                # ═══════════════════════════════════════════════════════
+                # AFIȘARE REZULTATE
+                # ═══════════════════════════════════════════════════════
+                
+                st.divider()
+                st.success("✅ Reconciliere completă!")
+                
+                # Comparare suma totală
+                diferenta = suma_aviz - pl_data['total_vanzari_nete']
+                diferenta_procent = (diferenta / suma_aviz * 100) if suma_aviz != 0 else 0
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.metric(
+                        "💰 Suma din Aviz",
+                        f"{suma_aviz:,.2f} RON",
+                        help="Suma totală din avizul de plată eMAG"
+                    )
+                
+                with col2:
+                    st.metric(
+                        "📊 Suma din P&L",
+                        f"{pl_data['total_vanzari_nete']:,.2f} RON",
+                        help="Suma calculată din rapoartele P&L pentru aceeași perioadă"
+                    )
+                
+                with col3:
+                    delta_color = "off" if abs(diferenta) < 1 else ("normal" if diferenta >= 0 else "inverse")
+                    
+                    if abs(diferenta) < 1:
+                        st.metric(
+                            "✅ Diferență",
+                            f"{diferenta:,.2f} RON",
+                            delta="MATCH PERFECT! ✓",
+                            delta_color=delta_color
+                        )
+                    elif abs(diferenta) < 10:
+                        st.metric(
+                            "⚠️ Diferență Mică",
+                            f"{diferenta:,.2f} RON",
+                            delta=f"{abs(diferenta_procent):.2f}%",
+                            delta_color=delta_color,
+                            help="Diferență acceptabilă (probabil rotunjiri)"
+                        )
+                    else:
+                        st.metric(
+                            "❌ Diferență Mare",
+                            f"{diferenta:,.2f} RON",
+                            delta=f"{abs(diferenta_procent):.2f}%",
+                            delta_color=delta_color,
+                            help="Diferență semnificativă - investigare necesară!"
+                        )
+                
+                st.divider()
+                
+                # ═══════════════════════════════════════════════════════
+                # DETALII RECONCILIERE
+                # ═══════════════════════════════════════════════════════
+                
+                st.subheader("📋 Detalii Reconciliere")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.markdown("### 💰 Date din Aviz")
+                    st.metric("Număr Aviz", aviz_number)
+                    st.metric("Perioada", f"{perioada_start.strftime('%d/%m/%Y')} - {perioada_end.strftime('%d/%m/%Y')}")
+                    st.metric("Suma Totală", f"{suma_aviz:,.2f} RON")
+                    
+                    if incasari_aviz > 0:
+                        st.caption(f"➕ Încasări: {incasari_aviz:,.2f} RON")
+                        st.caption(f"➖ Comisioane: {comisioane_aviz:,.2f} RON")
+                        st.caption(f"➖ Vouchere: {vouchere_aviz:,.2f} RON")
+                        st.caption(f"➖ Taxe livrare: {taxe_livrare_aviz:,.2f} RON")
+                
+                with col2:
+                    st.markdown("### 📊 Date din P&L")
+                    st.metric("Comenzi în perioadă", f"{pl_data['nr_comenzi']} linii ({pl_data['comenzi_unice']} comenzi)")
+                    st.metric("Total Produse", f"{pl_data['total_bucati']} bucăți")
+                    st.metric("Vânzări Nete", f"{pl_data['total_vanzari_nete']:,.2f} RON")
+                    
+                    with st.expander("🔍 Detalii calcul"):
+                        st.caption(f"➕ Vânzări: {pl_data['total_vanzari']:,.2f} RON")
+                        st.caption(f"➖ Comisioane: {pl_data['total_comision']:,.2f} RON")
+                        st.caption(f"➖ Valoare reținută: {pl_data['total_valoare_retinuta']:,.2f} RON")
+                        st.caption(f"➖ Taxe livrare: {pl_data['total_taxa_livrare']:,.2f} RON")
+                        st.caption(f"➖ Taxe retur: {pl_data['total_taxa_retur']:,.2f} RON")
+                        st.caption(f"➖ Depozitare FBE: {pl_data['total_depozitare_fbe']:,.2f} RON")
+                        st.caption(f"➖ Operațiuni FBE: {pl_data['total_operatiuni_fbe']:,.2f} RON")
+                
+                # ═══════════════════════════════════════════════════════
+                # ANALIZĂ DIFERENȚĂ
+                # ═══════════════════════════════════════════════════════
+                
+                if abs(diferenta) >= 10:
+                    st.divider()
+                    st.warning("⚠️ **DIFERENȚĂ SEMNIFICATIVĂ DETECTATĂ!**")
+                    
+                    st.markdown("""
+                    ### Posibile cauze:
+                    
+                    1. **Retururi procesate după P&L**
+                       - eMAG a procesat retururi care nu apar încă în raportul P&L
+                       - Soluție: Descarcă un P&L mai recent
+                    
+                    2. **Facturi comision emise ulterior**
+                       - Comisioane suplimentare facturate separat
+                       - Verifică dacă ai primit facturi C-MKTP în aviz
+                    
+                    3. **Comenzi anulate/stornate**
+                       - Comenzi care apar în P&L dar au fost stornate
+                       - Verifică statusul comenzilor în platformă
+                    
+                    4. **Ajustări manuale eMAG**
+                       - Penalități, bonusuri, corecții
+                       - Contactează suportul eMAG pentru detalii
+                    
+                    5. **Perioada diferită**
+                       - Verifică că perioada din P&L coincide exact cu cea din aviz
+                       - eMAG folosește timestamp-uri precise
+                    """)
+                
+                elif abs(diferenta) >= 1:
+                    st.info("ℹ️ Diferență mică - probabil erori de rotunjire sau comisioane sub 1 RON")
+                
+                else:
+                    st.success("✅ **MATCH PERFECT!** Avizul coincide 100% cu P&L-ul.")
+                
+            except Exception as e:
+                st.error(f"❌ Eroare la reconciliere: {e}")
+                st.exception(e)
+                if conn:
+                    conn.close()
+    
+    else:
+        st.markdown("""
+        ### 📖 Cum să folosești Reconcilierea:
+        
+        1. **Primești aviz de plată** de la eMAG (email sau platformă)
+        2. **Download PDF/Excel** al avizului
+        3. **Upload aici** și completează datele
+        4. **Aplicația calculează automat** din P&L pentru aceeași perioadă
+        5. **Vezi diferențele** și cauzele posibile
+        
+        ### 💡 Tips:
+        
+        - Asigură-te că ai upload-at **toate rapoartele P&L** pentru perioada avizului
+        - Verifică că **perioada** din aviz coincide exact cu cea selectată
+        - Diferențe sub **5 RON** sunt normale (rotunjiri)
+        - Diferențe peste **10 RON** necesită investigare
+        """)
+
 
 # ═══════════════════════════════════════════════════════
 # TAB 4: RAPOARTE

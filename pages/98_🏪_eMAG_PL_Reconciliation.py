@@ -468,11 +468,8 @@ st.divider()
 # TABS PRINCIPALE
 # ═══════════════════════════════════════════════════════
 
-tab1, tab2, tab3, tab4 = st.tabs([
-    "📤 Upload P&L",
-    "📊 Dashboard", 
-    "💰 Reconciliere Avize",
-    "📈 Rapoarte"
+tab1, tab2, tab3, tab4 = st.tabs(["📤 Upload P&L", "📊 Dashboard", "💰 Reconciliere Avize", "🔬 Test API"])
+
 ])
 
 # ═══════════════════════════════════════════════════════
@@ -1192,19 +1189,234 @@ with tab3:
 
 
 # ═══════════════════════════════════════════════════════
-# TAB 4: RAPOARTE
+# TAB 4: TEST API eMAG (TEMPORAR - PENTRU DESCOPERIRE)
 # ═══════════════════════════════════════════════════════
 
 with tab4:
-    st.header("📈 Rapoarte Profit")
-    st.info("🚧 **În dezvoltare** - Aici vei genera rapoarte financiare")
+    st.header("🔬 Test eMAG API - Descoperire Documente")
     
-    st.markdown("""
-    ### Funcționalitate viitoare:
-    
-    1. **Raport profit lunar** - Profit per lună
-    2. **Raport per produs** - Top produse profitabile
-    3. **Raport comenzi stornate** - Impact retururi
-    4. **Export PDF/Excel** - Rapoarte descărcabile
-    5. **Grafice** - Vizualizare trends
+    st.info("""
+    Acest tab testează API-ul eMAG pentru a vedea:
+    1. Ce categorii de facturi există
+    2. Ce tipuri de documente pot fi extrase
+    3. Exemplu de răspuns API
     """)
+    
+    # ═══════════════════════════════════════════════════════
+    # TEST 1: Invoice Categories
+    # ═══════════════════════════════════════════════════════
+    
+    st.subheader("📋 Test 1: Categorii Facturi Disponibile")
+    
+    if st.button("🔍 Testează /invoice/categories", type="primary"):
+        try:
+            emag_username = st.secrets["connections"]["emag"]["USERNAME"]
+            emag_password = st.secrets["connections"]["emag"]["PASSWORD"]
+            emag_api_url = st.secrets["connections"]["emag"]["API_URL"]
+            
+            credentials = f"{emag_username}:{emag_password}"
+            encoded_credentials = base64.b64encode(credentials.encode()).decode()
+            
+            headers = {
+                "Authorization": f"Basic {encoded_credentials}",
+                "Content-Type": "application/json"
+            }
+            
+            with st.spinner("Calling API..."):
+                response = requests.post(
+                    f"{emag_api_url}/invoice/categories",
+                    headers=headers,
+                    json={},
+                    timeout=30
+                )
+            
+            st.write(f"**HTTP Status:** {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                st.success("✅ API Call Success!")
+                
+                st.json(data)
+                
+                if data.get('results'):
+                    st.write("**Categorii găsite:**")
+                    categories = data['results']
+                    
+                    if isinstance(categories, list):
+                        for cat in categories:
+                            st.write(f"- **{cat.get('id')}**: {cat.get('name')}")
+                    else:
+                        st.write(categories)
+            else:
+                st.error(f"❌ API Error: {response.status_code}")
+                st.code(response.text)
+                
+        except Exception as e:
+            st.error(f"❌ Exception: {e}")
+            st.exception(e)
+    
+    st.divider()
+    
+    # ═══════════════════════════════════════════════════════
+    # TEST 2: Invoice Read (ultimele 30 zile)
+    # ═══════════════════════════════════════════════════════
+    
+    st.subheader("📄 Test 2: Extrage Facturi (ultimele 30 zile)")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        days_back = st.number_input("Zile înapoi", min_value=1, max_value=90, value=30)
+    
+    with col2:
+        category_filter = st.text_input("Filtru categorie (opțional)", placeholder="FC, VC, etc.")
+    
+    if st.button("🔍 Testează /invoice/read", type="primary"):
+        try:
+            emag_username = st.secrets["connections"]["emag"]["USERNAME"]
+            emag_password = st.secrets["connections"]["emag"]["PASSWORD"]
+            emag_api_url = st.secrets["connections"]["emag"]["API_URL"]
+            
+            credentials = f"{emag_username}:{emag_password}"
+            encoded_credentials = base64.b64encode(credentials.encode()).decode()
+            
+            headers = {
+                "Authorization": f"Basic {encoded_credentials}",
+                "Content-Type": "application/json"
+            }
+            
+            # Calculează perioada
+            date_end = datetime.now().strftime('%Y-%m-%d')
+            date_start = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            
+            payload = {
+                "datestart": date_start,
+                "dateend": date_end
+            }
+            
+            if category_filter:
+                payload["category"] = category_filter
+            
+            st.write(f"**Perioada:** {date_start} → {date_end}")
+            st.write(f"**Payload:** {payload}")
+            
+            with st.spinner("Calling API..."):
+                response = requests.post(
+                    f"{emag_api_url}/invoice/read",
+                    headers=headers,
+                    json=payload,
+                    timeout=60
+                )
+            
+            st.write(f"**HTTP Status:** {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                st.success("✅ API Call Success!")
+                
+                st.write(f"**isError:** {data.get('isError')}")
+                st.write(f"**Messages:** {data.get('messages')}")
+                
+                if data.get('results'):
+                    invoices = data['results'] if isinstance(data['results'], list) else [data['results']]
+                    
+                    st.success(f"**Găsite: {len(invoices)} facturi**")
+                    
+                    # Afișează primele 3 complete
+                    with st.expander(f"🔍 Vezi primele 3 facturi (din {len(invoices)})"):
+                        st.json(invoices[:3])
+                    
+                    # Tabel sumar
+                    st.write("**Sumar facturi:**")
+                    
+                    df_invoices = pd.DataFrame([
+                        {
+                            'Număr': inv.get('number'),
+                            'Categorie': inv.get('category'),
+                            'Nume': inv.get('name'),
+                            'Data': inv.get('date'),
+                            'Order ID': inv.get('orderid'),
+                            'Total cu TVA': inv.get('totalwithvat'),
+                            'Storno': '✅' if inv.get('isstorno') else ''
+                        }
+                        for inv in invoices
+                    ])
+                    
+                    st.dataframe(df_invoices, use_container_width=True, height=400)
+                    
+                    # Statistici pe categorii
+                    st.divider()
+                    st.write("**Statistici pe categorii:**")
+                    
+                    categories_count = {}
+                    for inv in invoices:
+                        cat = inv.get('category', 'Unknown')
+                        name = inv.get('name', 'Unknown')
+                        key = f"{cat} ({name})"
+                        categories_count[key] = categories_count.get(key, 0) + 1
+                    
+                    for cat, count in sorted(categories_count.items(), key=lambda x: x[1], reverse=True):
+                        st.write(f"- **{cat}**: {count} facturi")
+                    
+                else:
+                    st.warning("⚠️ Nu există facturi în perioada selectată")
+                    st.json(data)
+            else:
+                st.error(f"❌ API Error: {response.status_code}")
+                st.code(response.text)
+                
+        except Exception as e:
+            st.error(f"❌ Exception: {e}")
+            st.exception(e)
+    
+    st.divider()
+    
+    # ═══════════════════════════════════════════════════════
+    # TEST 3: Invoice Read by Number
+    # ═══════════════════════════════════════════════════════
+    
+    st.subheader("🔎 Test 3: Caută Factură Specifică")
+    
+    invoice_number_test = st.text_input("Număr factură", placeholder="C-MKTP-4990846")
+    
+    if st.button("🔍 Caută Factură", type="primary"):
+        if not invoice_number_test:
+            st.warning("Introdu un număr de factură!")
+        else:
+            try:
+                emag_username = st.secrets["connections"]["emag"]["USERNAME"]
+                emag_password = st.secrets["connections"]["emag"]["PASSWORD"]
+                emag_api_url = st.secrets["connections"]["emag"]["API_URL"]
+                
+                credentials = f"{emag_username}:{emag_password}"
+                encoded_credentials = base64.b64encode(credentials.encode()).decode()
+                
+                headers = {
+                    "Authorization": f"Basic {encoded_credentials}",
+                    "Content-Type": "application/json"
+                }
+                
+                payload = {"number": invoice_number_test}
+                
+                with st.spinner("Calling API..."):
+                    response = requests.post(
+                        f"{emag_api_url}/invoice/read",
+                        headers=headers,
+                        json=payload,
+                        timeout=30
+                    )
+                
+                st.write(f"**HTTP Status:** {response.status_code}")
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    st.success("✅ API Call Success!")
+                    st.json(data)
+                else:
+                    st.error(f"❌ API Error: {response.status_code}")
+                    st.code(response.text)
+                    
+            except Exception as e:
+                st.error(f"❌ Exception: {e}")
+                st.exception(e)
+

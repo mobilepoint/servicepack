@@ -33,7 +33,6 @@ if HAS_AUTH:
 # CONEXIUNE POSTGRESQL
 # ═══════════════════════════════════════════════════════
 
-@st.cache_resource
 def get_db_connection():
     """Conexiune la PostgreSQL folosind secrets"""
     try:

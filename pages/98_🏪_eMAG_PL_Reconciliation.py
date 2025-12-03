@@ -198,6 +198,263 @@ def get_db_stats(conn):
     except:
         cursor.close()
         return None
+# ═══════════════════════════════════════════════════════
+# FUNCȚII PENTRU RECONCILIERE AVIZE (PAS 2)
+# ═══════════════════════════════════════════════════════
+
+import re
+import base64
+import PyPDF2
+from io import BytesIO
+
+def parse_payout_pdf(pdf_file):
+    """
+    Parse PDF aviz plată și extrage:
+    - Număr aviz
+    - Perioada
+    - Facturi (C-MKTP, V-MKTP, etc.) cu sume
+    - Total
+    """
+    try:
+        # Citește PDF
+        pdf_reader = PyPDF2.PdfReader(BytesIO(pdf_file.read()))
+        full_text = ""
+        
+        for page in pdf_reader.pages:
+            full_text += page.extract_text()
+        
+        # Reset file pointer
+        pdf_file.seek(0)
+        
+        # Parse număr aviz (ex: 36898183)
+        aviz_match = re.search(r'Aviz[^\d]*(\d{8,})', full_text, re.IGNORECASE)
+        payout_number = aviz_match.group(1) if aviz_match else None
+        
+        # Parse perioada (ex: 01.11.2025 - 15.11.2025)
+        period_match = re.search(r'(\d{2}[./-]\d{2}[./-]\d{4})\s*[-–]\s*(\d{2}[./-]\d{2}[./-]\d{4})', full_text)
+        period_start = None
+        period_end = None
+        if period_match:
+            period_start = period_match.group(1).replace('.', '-').replace('/', '-')
+            period_end = period_match.group(2).replace('.', '-').replace('/', '-')
+        
+        # Parse facturi (C-MKTP, V-MKTP, Y-MKTP, E-MKTP)
+        invoice_pattern = r'([CVYE]-MKTP-\d+)\s+([\d.]+[,.]?\d{2})\s*[-]?'
+        invoices = []
+        
+        for match in re.finditer(invoice_pattern, full_text):
+            invoice_num = match.group(1)
+            amount_str = match.group(2).replace('.', '').replace(',', '.')
+            
+            # Determină semnul (+ sau -)
+            context = full_text[max(0, match.start()-100):match.end()+20]
+            is_negative = '-' in context or 'comision' in context.lower() or 'taxa' in context.lower()
+            
+            amount = float(amount_str) * (-1 if is_negative else 1)
+            
+            invoices.append({
+                'number': invoice_num,
+                'amount': amount,
+                'category': invoice_num[0]  # C, V, Y, E
+            })
+        
+        # Parse încasări COD
+        cod_match = re.search(r'ramburs[^\d]*([\d.,]+)', full_text, re.IGNORECASE)
+        collections_cod = float(cod_match.group(1).replace('.', '').replace(',', '.')) if cod_match else 0
+        
+        # Parse încasări Card
+        card_match = re.search(r'card[^\d]*([\d.,]+)', full_text, re.IGNORECASE)
+        collections_card = float(card_match.group(1).replace('.', '').replace(',', '.')) if card_match else 0
+        
+        # Parse total
+        total_match = re.search(r'total[^\d]*([-]?[\d.,]+)', full_text, re.IGNORECASE)
+        total_amount = float(total_match.group(1).replace('.', '').replace(',', '.')) if total_match else 0
+        
+        return {
+            'success': True,
+            'payout_number': payout_number,
+            'period_start': period_start,
+            'period_end': period_end,
+            'invoices': invoices,
+            'collections_cod': collections_cod,
+            'collections_card': collections_card,
+            'total_amount': total_amount,
+            'raw_text': full_text[:500]  # Primele 500 caractere pentru debug
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
+def call_emag_invoice_api(invoice_number):
+    """
+    Call eMAG Invoice API pentru a obține detalii factură
+    """
+    try:
+        emag_username = st.secrets["connections"]["emag"]["USERNAME"]
+        emag_password = st.secrets["connections"]["emag"]["PASSWORD"]
+        emag_api_url = st.secrets["connections"]["emag"]["API_URL"]
+        
+        # Creare Basic Auth header
+        credentials = f"{emag_username}:{emag_password}"
+        encoded_credentials = base64.b64encode(credentials.encode()).decode()
+        
+        headers = {
+            "Authorization": f"Basic {encoded_credentials}",
+            "Content-Type": "application/json"
+        }
+        
+        # Payload pentru /invoice/read
+        payload = {
+            "number": invoice_number
+        }
+        
+        import requests
+        response = requests.post(
+            f"{emag_api_url}/invoice/read",
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            
+            if not data.get('isError', True) and data.get('results'):
+                invoice_data = data['results'][0] if isinstance(data['results'], list) else data['results']
+                
+                return {
+                    'success': True,
+                    'invoice': invoice_data,
+                    'order_id': invoice_data.get('orderid')
+                }
+            else:
+                return {
+                    'success': False,
+                    'error': data.get('messages', ['API returned error'])
+                }
+        else:
+            return {
+                'success': False,
+                'error': f"HTTP {response.status_code}: {response.text}"
+            }
+            
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
+
+
+def save_payout_notice_to_db(conn, payout_data):
+    """
+    Salvează avizul de plată în baza de date
+    """
+    cursor = conn.cursor(cursor_factory=RealDictCursor)
+    
+    try:
+        sql = """
+            INSERT INTO emag_payout_notices (
+                payout_number, payout_date, period_start, period_end,
+                total_amount, collections_cod, collections_card,
+                commissions, vouchers, other_fees,
+                pdf_file_name, uploaded_by
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (payout_number) 
+            DO UPDATE SET
+                total_amount = EXCLUDED.total_amount,
+                collections_cod = EXCLUDED.collections_cod,
+                collections_card = EXCLUDED.collections_card,
+                updated_at = NOW()
+            RETURNING id
+        """
+        
+        # Calculează breakdown
+        commissions = sum(inv['amount'] for inv in payout_data['invoices'] if inv['category'] == 'C')
+        vouchers = sum(inv['amount'] for inv in payout_data['invoices'] if inv['category'] == 'V')
+        other_fees = sum(inv['amount'] for inv in payout_data['invoices'] if inv['category'] in ['Y', 'E'])
+        
+        values = (
+            payout_data['payout_number'],
+            payout_data.get('payout_date'),
+            payout_data.get('period_start'),
+            payout_data.get('period_end'),
+            payout_data['total_amount'],
+            payout_data['collections_cod'],
+            payout_data['collections_card'],
+            commissions,
+            vouchers,
+            other_fees,
+            payout_data.get('pdf_file_name'),
+            'system'  # sau user din session
+        )
+        
+        cursor.execute(sql, values)
+        conn.commit()
+        
+        payout_id = cursor.fetchone()['id']
+        cursor.close()
+        
+        return {'success': True, 'payout_id': payout_id}
+        
+    except Exception as e:
+        conn.rollback()
+        cursor.close()
+        return {'success': False, 'error': str(e)}
+
+
+def save_invoice_to_db(conn, invoice_data, payout_id):
+    """
+    Salvează factura în baza de date
+    """
+    cursor = conn.cursor()
+    
+    try:
+        sql = """
+            INSERT INTO emag_invoices (
+                invoice_number, invoice_category, invoice_name, invoice_date,
+                order_id, total_without_vat, total_with_vat, vat_value,
+                is_storno, payout_notice_id, raw_api_response
+            ) VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+            )
+            ON CONFLICT (invoice_number) 
+            DO UPDATE SET
+                payout_notice_id = EXCLUDED.payout_notice_id,
+                updated_at = NOW()
+            RETURNING id
+        """
+        
+        values = (
+            invoice_data.get('number'),
+            invoice_data.get('category'),
+            invoice_data.get('name'),
+            invoice_data.get('date'),
+            invoice_data.get('orderid'),
+            invoice_data.get('totalwithoutvat'),
+            invoice_data.get('totalwithvat'),
+            invoice_data.get('vatvalue'),
+            invoice_data.get('isstorno', False),
+            payout_id,
+            None  # raw_api_response - poate fi adăugat JSON complet
+        )
+        
+        cursor.execute(sql, values)
+        conn.commit()
+        cursor.close()
+        
+        return {'success': True}
+        
+    except Exception as e:
+        conn.rollback()
+        cursor.close()
+        return {'success': False, 'error': str(e)}
+
 
 # ═══════════════════════════════════════════════════════
 # HEADER PRINCIPAL

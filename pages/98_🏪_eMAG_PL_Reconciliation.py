@@ -1,8 +1,16 @@
 import streamlit as st
 import pandas as pd
-from datetime import datetime
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import re
+import base64
+import requests
+import PyPDF2
+from io import BytesIO
+from datetime import datetime, timedelta
+
+st.set_page_config(page_title="eMAG P&L Reconciliation", page_icon="🏪", layout="wide")
+
 
 # Import autentificare (dacă există)
 try:

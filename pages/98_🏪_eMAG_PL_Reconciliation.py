@@ -155,7 +155,7 @@ def upsert_order_line(conn, row, batch_id, file_name):
             float(row['cost_livrare']) if pd.notnull(row['cost_livrare']) else 0.0,
             float(row['cost_retur']) if pd.notnull(row['cost_retur']) else 0.0,
             float(row['vanzari_nete']) if pd.notnull(row['vanzari_nete']) else 0.0,
-            float(row['vanzari_nete']) if pd.notnull(row['vanzari_nete']) else 0.0,  # profit_net = vanzari_nete pentru moment
+            float(row['vanzari_nete']) if pd.notnull(row['vanzari_nete']) else 0.0,  # profit_net = vanzari_nete
             batch_id,
             file_name
         )
@@ -232,22 +232,6 @@ with tab1:
     2. Upload fișierul Excel aici
     3. Aplicația va procesa automat și va evita duplicatele
     """)
-    
-    # Statistici DB curente
-    conn_stats = get_db_connection()
-    if conn_stats:
-        stats_db = get_db_stats(conn_stats)
-        if stats_db:
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total linii în DB", stats_db['total_lines'])
-            with col2:
-                st.metric("Comenzi unice", stats_db['unique_orders'])
-            with col3:
-                st.metric("Profit total", f"{stats_db['total_profit']:.2f} RON")
-        conn_stats.close()
-    
-    st.divider()
     
     uploaded_file = st.file_uploader(
         "Selectează fișierul Excel P&L",

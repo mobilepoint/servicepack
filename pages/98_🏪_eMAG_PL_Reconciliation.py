@@ -827,153 +827,43 @@ with tab2:
 
 
 # ═══════════════════════════════════════════════════════
-# TAB 3: RECONCILIERE AVIZE
+# TAB 3: RECONCILIERE AVIZE - AUTOMATĂ
 # ═══════════════════════════════════════════════════════
 
 with tab3:
-    st.header("💰 Reconciliere Avize Plată eMAG")
+    st.header("💰 Reconciliere Automată Avize Plată")
     
     st.info("""
-    **Cum funcționează:**
-    1. Upload avizul de plată (PDF/Excel) primit de la eMAG
-    2. Aplicația extrage automat suma totală și perioada
-    3. Calculează suma așteptată din P&L pentru aceeași perioadă
-    4. Afișează diferențele (dacă există)
+    **Flow automat:**
+    1. Upload PDF aviz de plată
+    2. Aplicația parse-ază automat PDF-ul
+    3. Pentru fiecare factură (C-MKTP, V-MKTP, etc.) → Call eMAG API
+    4. Match facturile cu comenzile din P&L
+    5. Salvare în baza de date + Raport reconciliere
     """)
     
     # ═══════════════════════════════════════════════════════
-    # UPLOAD AVIZ
+    # UPLOAD AVIZ PDF
     # ═══════════════════════════════════════════════════════
     
     uploaded_aviz = st.file_uploader(
-        "📄 Selectează Avizul de Plată",
-        type=['pdf', 'xlsx', 'xls', 'csv'],
-        help="Acceptăm PDF sau Excel de la eMAG"
+        "📄 Upload Aviz Plată (PDF)",
+        type=['pdf'],
+        help="Avizul de plată primit de la eMAG"
     )
     
     if uploaded_aviz:
         st.success(f"✅ Fișier încărcat: **{uploaded_aviz.name}**")
         
         # ═══════════════════════════════════════════════════════
-        # INTRODUCERE MANUALĂ DATE AVIZ
+        # BUTON PROCESARE AUTOMATĂ
         # ═══════════════════════════════════════════════════════
         
-        st.divider()
-        st.subheader("📋 Detalii Aviz")
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            aviz_number = st.text_input(
-                "Număr Aviz",
-                placeholder="Ex: 36898183",
-                help="Numărul avizului de plată"
-            )
+        if st.button("🚀 Procesează Automat & Reconciliază", type="primary"):
             
-            suma_aviz = st.number_input(
-                "💰 Suma Totală din Aviz (RON)",
-                min_value=-100000.0,
-                max_value=100000.0,
-                value=0.0,
-                step=0.01,
-                format="%.2f",
-                help="Suma finală din aviz (poate fi pozitivă sau negativă)"
-            )
-        
-        with col2:
-            perioada_start = st.date_input(
-                "📅 Perioada Start",
-                help="Prima zi din perioada avizului"
-            )
-            
-            perioada_end = st.date_input(
-                "📅 Perioada End",
-                help="Ultima zi din perioada avizului"
-            )
-        
-        st.divider()
-        
-        # ═══════════════════════════════════════════════════════
-        # DETALII LINII AVIZ (OPȚIONAL)
-        # ═══════════════════════════════════════════════════════
-        
-        with st.expander("📝 Detalii Linii Aviz (opțional - pentru analiză detaliată)"):
-            st.caption("Dacă vrei verificare detaliată, introdu sumele din aviz:")
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                incasari_aviz = st.number_input(
-                    "➕ Încasări Comenzi",
-                    min_value=0.0,
-                    value=0.0,
-                    step=0.01,
-                    format="%.2f"
-                )
-                
-                comisioane_aviz = st.number_input(
-                    "➖ Comisioane eMAG",
-                    min_value=0.0,
-                    value=0.0,
-                    step=0.01,
-                    format="%.2f"
-                )
-            
-            with col2:
-                vouchere_aviz = st.number_input(
-                    "➖ Vouchere",
-                    min_value=0.0,
-                    value=0.0,
-                    step=0.01,
-                    format="%.2f"
-                )
-                
-                taxe_livrare_aviz = st.number_input(
-                    "➖ Taxe Livrare",
-                    min_value=0.0,
-                    value=0.0,
-                    step=0.01,
-                    format="%.2f"
-                )
-            
-            with col3:
-                taxe_retur_aviz = st.number_input(
-                    "➖ Taxe Retur",
-                    min_value=0.0,
-                    value=0.0,
-                    step=0.01,
-                    format="%.2f"
-                )
-                
-                altele_aviz = st.number_input(
-                    "➖ Altele (ajustări)",
-                    min_value=0.0,
-                    value=0.0,
-                    step=0.01,
-                    format="%.2f"
-                )
-        
-        # ═══════════════════════════════════════════════════════
-        # BUTON RECONCILIERE
-        # ═══════════════════════════════════════════════════════
-        
-        if st.button("🔍 Reconciliază cu P&L", type="primary"):
-            
-            if not aviz_number or suma_aviz == 0:
-                st.warning("⚠️ Te rog completează Număr Aviz și Suma Totală")
-                st.stop()
-            
-            if not perioada_start or not perioada_end:
-                st.warning("⚠️ Te rog selectează perioada avizului")
-                st.stop()
-            
-            if perioada_end < perioada_start:
-                st.error("❌ Perioada End trebuie să fie după Perioada Start")
-                st.stop()
-            
-            # ═══════════════════════════════════════════════════════
-            # CALCUL DIN P&L
-            # ═══════════════════════════════════════════════════════
+            progress_container = st.container()
+            status_text = st.empty()
+            progress_bar = st.progress(0)
             
             conn = get_db_connection()
             if not conn:
@@ -981,125 +871,249 @@ with tab3:
                 st.stop()
             
             try:
-                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                # ═══════════════════════════════════════════════════════
+                # PASUL 1: PARSE PDF
+                # ═══════════════════════════════════════════════════════
                 
-                st.info(f"🔄 Calculez din P&L pentru perioada: {perioada_start.strftime('%d/%m/%Y')} - {perioada_end.strftime('%d/%m/%Y')}...")
+                status_text.text("📖 Pasul 1/5: Parse PDF aviz...")
+                progress_bar.progress(10)
                 
+                parse_result = parse_payout_pdf(uploaded_aviz)
+                
+                if not parse_result['success']:
+                    st.error(f"❌ Eroare la parse PDF: {parse_result['error']}")
+                    st.stop()
+                
+                st.success(f"✅ PDF parsat! Găsite {len(parse_result['invoices'])} facturi")
+                
+                # Afișează ce am găsit
+                with st.expander("🔍 Detalii PDF parsat"):
+                    st.write(f"**Număr Aviz:** {parse_result['payout_number']}")
+                    st.write(f"**Perioada:** {parse_result['period_start']} → {parse_result['period_end']}")
+                    st.write(f"**Încasări COD:** {parse_result['collections_cod']:,.2f} RON")
+                    st.write(f"**Încasări Card:** {parse_result['collections_card']:,.2f} RON")
+                    st.write(f"**Total Aviz:** {parse_result['total_amount']:,.2f} RON")
+                    
+                    st.write("**Facturi găsite:**")
+                    for inv in parse_result['invoices']:
+                        st.caption(f"- {inv['number']}: {inv['amount']:,.2f} RON")
+                
+                progress_bar.progress(20)
+                
+                # ═══════════════════════════════════════════════════════
+                # PASUL 2: SALVARE AVIZ ÎN DB
+                # ═══════════════════════════════════════════════════════
+                
+                status_text.text("💾 Pasul 2/5: Salvare aviz în baza de date...")
+                progress_bar.progress(30)
+                
+                payout_data = {
+                    **parse_result,
+                    'pdf_file_name': uploaded_aviz.name,
+                    'payout_date': datetime.now().date()
+                }
+                
+                save_payout_result = save_payout_notice_to_db(conn, payout_data)
+                
+                if not save_payout_result['success']:
+                    st.error(f"❌ Eroare salvare aviz: {save_payout_result['error']}")
+                    st.stop()
+                
+                payout_id = save_payout_result['payout_id']
+                st.success(f"✅ Aviz salvat în DB! ID: {payout_id}")
+                
+                progress_bar.progress(40)
+                
+                # ═══════════════════════════════════════════════════════
+                # PASUL 3: CALL eMAG API PENTRU FIECARE FACTURĂ
+                # ═══════════════════════════════════════════════════════
+                
+                status_text.text("🔄 Pasul 3/5: Call eMAG API pentru facturi...")
+                progress_bar.progress(50)
+                
+                invoice_results = []
+                total_invoices = len(parse_result['invoices'])
+                
+                for idx, invoice in enumerate(parse_result['invoices']):
+                    status_text.text(f"🔄 Procesez factură {idx+1}/{total_invoices}: {invoice['number']}...")
+                    
+                    api_result = call_emag_invoice_api(invoice['number'])
+                    
+                    invoice_results.append({
+                        'number': invoice['number'],
+                        'amount': invoice['amount'],
+                        'api_success': api_result['success'],
+                        'order_id': api_result.get('order_id') if api_result['success'] else None,
+                        'error': api_result.get('error') if not api_result['success'] else None,
+                        'invoice_data': api_result.get('invoice') if api_result['success'] else None
+                    })
+                    
+                    # Salvare factură în DB (dacă API a returnat date)
+                    if api_result['success'] and api_result.get('invoice'):
+                        save_invoice_to_db(conn, api_result['invoice'], payout_id)
+                    
+                    # Update progress
+                    progress = 50 + int((idx + 1) / total_invoices * 30)
+                    progress_bar.progress(progress)
+                
+                st.success(f"✅ Procesate {len(invoice_results)} facturi via API")
+                
+                progress_bar.progress(80)
+                
+                # ═══════════════════════════════════════════════════════
+                # PASUL 4: MATCH CU COMENZILE DIN P&L
+                # ═══════════════════════════════════════════════════════
+                
+                status_text.text("🔍 Pasul 4/5: Match comenzi cu P&L...")
+                progress_bar.progress(85)
+                
+                # Extrage order_id-urile găsite
+                order_ids = [r['order_id'] for r in invoice_results if r['order_id']]
+                
+                matched_orders = []
+                if order_ids:
+                    cursor = conn.cursor(cursor_factory=RealDictCursor)
+                    
+                    # Găsește comenzile în P&L
+                    cursor.execute("""
+                        SELECT 
+                            id_comanda,
+                            data,
+                            sku,
+                            produs,
+                            vanzari,
+                            comision,
+                            vanzari_nete,
+                            profit_net
+                        FROM emag_order_lines
+                        WHERE id_comanda = ANY(%s)
+                    """, (order_ids,))
+                    
+                    matched_orders = cursor.fetchall()
+                    
+                    # Update comenzile cu payout_notice_id
+                    cursor.execute("""
+                        UPDATE emag_order_lines
+                        SET payout_notice_id = %s
+                        WHERE id_comanda = ANY(%s)
+                    """, (payout_id, order_ids))
+                    
+                    conn.commit()
+                    cursor.close()
+                
+                st.success(f"✅ Găsite {len(matched_orders)} comenzi în P&L din {len(order_ids)} facturi")
+                
+                progress_bar.progress(90)
+                
+                # ═══════════════════════════════════════════════════════
+                # PASUL 5: CALCUL RECONCILIERE & UPDATE STATUS
+                # ═══════════════════════════════════════════════════════
+                
+                status_text.text("📊 Pasul 5/5: Calcul reconciliere...")
+                progress_bar.progress(95)
+                
+                # Calculează suma din P&L pentru comenzile matched
+                suma_pl = sum(float(order['vanzari_nete'] or 0) for order in matched_orders)
+                diferenta = parse_result['total_amount'] - suma_pl
+                
+                # Update status reconciliere în DB
+                cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT 
-                        COUNT(*) as nr_comenzi,
-                        COUNT(DISTINCT id_comanda) as comenzi_unice,
-                        SUM(cantitate) as total_bucati,
-                        ROUND(SUM(vanzari), 2) as total_vanzari,
-                        ROUND(SUM(taxa_livrare), 2) as total_taxa_livrare,
-                        ROUND(SUM(taxa_retur), 2) as total_taxa_retur,
-                        ROUND(SUM(valoare_retinuta), 2) as total_valoare_retinuta,
-                        ROUND(SUM(comision), 2) as total_comision,
-                        ROUND(SUM(comision_anulate), 2) as total_comision_anulate,
-                        ROUND(SUM(comision_taxa_livrare), 2) as total_comision_taxa_livrare,
-                        ROUND(SUM(depozitare_fbe), 2) as total_depozitare_fbe,
-                        ROUND(SUM(operatiuni_fbe), 2) as total_operatiuni_fbe,
-                        ROUND(SUM(cost_livrare), 2) as total_cost_livrare,
-                        ROUND(SUM(cost_retur), 2) as total_cost_retur,
-                        ROUND(SUM(vanzari_nete), 2) as total_vanzari_nete
-                    FROM emag_order_lines
-                    WHERE data BETWEEN %s AND %s
-                """, (perioada_start, perioada_end))
-                
-                pl_data = cursor.fetchone()
+                    UPDATE emag_payout_notices
+                    SET 
+                        is_reconciled = TRUE,
+                        reconciled_at = NOW(),
+                        difference = %s
+                    WHERE id = %s
+                """, (diferenta, payout_id))
+                conn.commit()
                 cursor.close()
-                conn.close()
+                
+                progress_bar.progress(100)
+                status_text.text("✅ Reconciliere completă!")
                 
                 # ═══════════════════════════════════════════════════════
                 # AFIȘARE REZULTATE
                 # ═══════════════════════════════════════════════════════
                 
                 st.divider()
-                st.success("✅ Reconciliere completă!")
+                st.success("🎉 **RECONCILIERE COMPLETĂ!**")
                 
-                # Comparare suma totală
-                diferenta = suma_aviz - pl_data['total_vanzari_nete']
-                diferenta_procent = (diferenta / suma_aviz * 100) if suma_aviz != 0 else 0
-                
-                col1, col2, col3 = st.columns(3)
+                # Metrici principale
+                col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
                     st.metric(
-                        "💰 Suma din Aviz",
-                        f"{suma_aviz:,.2f} RON",
-                        help="Suma totală din avizul de plată eMAG"
+                        "💰 Total Aviz",
+                        f"{parse_result['total_amount']:,.2f} RON"
                     )
                 
                 with col2:
                     st.metric(
-                        "📊 Suma din P&L",
-                        f"{pl_data['total_vanzari_nete']:,.2f} RON",
-                        help="Suma calculată din rapoartele P&L pentru aceeași perioadă"
+                        "📊 Total P&L",
+                        f"{suma_pl:,.2f} RON"
                     )
                 
                 with col3:
                     delta_color = "off" if abs(diferenta) < 1 else ("normal" if diferenta >= 0 else "inverse")
-                    
-                    if abs(diferenta) < 1:
-                        st.metric(
-                            "✅ Diferență",
-                            f"{diferenta:,.2f} RON",
-                            delta="MATCH PERFECT! ✓",
-                            delta_color=delta_color
-                        )
-                    elif abs(diferenta) < 10:
-                        st.metric(
-                            "⚠️ Diferență Mică",
-                            f"{diferenta:,.2f} RON",
-                            delta=f"{abs(diferenta_procent):.2f}%",
-                            delta_color=delta_color,
-                            help="Diferență acceptabilă (probabil rotunjiri)"
-                        )
-                    else:
-                        st.metric(
-                            "❌ Diferență Mare",
-                            f"{diferenta:,.2f} RON",
-                            delta=f"{abs(diferenta_procent):.2f}%",
-                            delta_color=delta_color,
-                            help="Diferență semnificativă - investigare necesară!"
-                        )
+                    st.metric(
+                        "⚖️ Diferență",
+                        f"{diferenta:,.2f} RON",
+                        delta_color=delta_color
+                    )
+                
+                with col4:
+                    match_status = "✅ PERFECT" if abs(diferenta) < 1 else ("⚠️ MICĂ" if abs(diferenta) < 10 else "❌ MARE")
+                    st.metric(
+                        "Status Match",
+                        match_status
+                    )
                 
                 st.divider()
                 
                 # ═══════════════════════════════════════════════════════
-                # DETALII RECONCILIERE
+                # DETALII FACTURI PROCESATE
                 # ═══════════════════════════════════════════════════════
                 
-                st.subheader("📋 Detalii Reconciliere")
+                st.subheader("📋 Detalii Facturi Procesate")
                 
-                col1, col2 = st.columns(2)
+                # Tabel facturi
+                df_invoices = pd.DataFrame([
+                    {
+                        'Factură': r['number'],
+                        'Sumă': f"{r['amount']:,.2f} RON",
+                        'API Status': '✅ OK' if r['api_success'] else '❌ FAIL',
+                        'Order ID': r['order_id'] if r['order_id'] else 'N/A',
+                        'Match P&L': '✅' if r['order_id'] in [o['id_comanda'] for o in matched_orders] else '❌'
+                    }
+                    for r in invoice_results
+                ])
                 
-                with col1:
-                    st.markdown("### 💰 Date din Aviz")
-                    st.metric("Număr Aviz", aviz_number)
-                    st.metric("Perioada", f"{perioada_start.strftime('%d/%m/%Y')} - {perioada_end.strftime('%d/%m/%Y')}")
-                    st.metric("Suma Totală", f"{suma_aviz:,.2f} RON")
+                st.dataframe(df_invoices, use_container_width=True)
+                
+                # Erori API (dacă există)
+                failed_invoices = [r for r in invoice_results if not r['api_success']]
+                if failed_invoices:
+                    with st.expander(f"⚠️ {len(failed_invoices)} facturi cu erori API"):
+                        for inv in failed_invoices:
+                            st.error(f"**{inv['number']}**: {inv['error']}")
+                
+                # ═══════════════════════════════════════════════════════
+                # COMENZI MATCHED
+                # ═══════════════════════════════════════════════════════
+                
+                if matched_orders:
+                    st.divider()
+                    st.subheader(f"🛒 {len(matched_orders)} Comenzi Găsite în P&L")
                     
-                    if incasari_aviz > 0:
-                        st.caption(f"➕ Încasări: {incasari_aviz:,.2f} RON")
-                        st.caption(f"➖ Comisioane: {comisioane_aviz:,.2f} RON")
-                        st.caption(f"➖ Vouchere: {vouchere_aviz:,.2f} RON")
-                        st.caption(f"➖ Taxe livrare: {taxe_livrare_aviz:,.2f} RON")
-                
-                with col2:
-                    st.markdown("### 📊 Date din P&L")
-                    st.metric("Comenzi în perioadă", f"{pl_data['nr_comenzi']} linii ({pl_data['comenzi_unice']} comenzi)")
-                    st.metric("Total Produse", f"{pl_data['total_bucati']} bucăți")
-                    st.metric("Vânzări Nete", f"{pl_data['total_vanzari_nete']:,.2f} RON")
+                    df_orders = pd.DataFrame(matched_orders)
+                    df_orders['data'] = pd.to_datetime(df_orders['data']).dt.strftime('%d/%m/%Y')
                     
-                    with st.expander("🔍 Detalii calcul"):
-                        st.caption(f"➕ Vânzări: {pl_data['total_vanzari']:,.2f} RON")
-                        st.caption(f"➖ Comisioane: {pl_data['total_comision']:,.2f} RON")
-                        st.caption(f"➖ Valoare reținută: {pl_data['total_valoare_retinuta']:,.2f} RON")
-                        st.caption(f"➖ Taxe livrare: {pl_data['total_taxa_livrare']:,.2f} RON")
-                        st.caption(f"➖ Taxe retur: {pl_data['total_taxa_retur']:,.2f} RON")
-                        st.caption(f"➖ Depozitare FBE: {pl_data['total_depozitare_fbe']:,.2f} RON")
-                        st.caption(f"➖ Operațiuni FBE: {pl_data['total_operatiuni_fbe']:,.2f} RON")
+                    st.dataframe(
+                        df_orders[['id_comanda', 'data', 'sku', 'produs', 'vanzari_nete', 'profit_net']],
+                        use_container_width=True,
+                        height=400
+                    )
                 
                 # ═══════════════════════════════════════════════════════
                 # ANALIZĂ DIFERENȚĂ
@@ -1107,61 +1121,74 @@ with tab3:
                 
                 if abs(diferenta) >= 10:
                     st.divider()
-                    st.warning("⚠️ **DIFERENȚĂ SEMNIFICATIVĂ DETECTATĂ!**")
+                    st.warning("⚠️ **Diferență semnificativă detectată!**")
                     
                     st.markdown("""
                     ### Posibile cauze:
                     
-                    1. **Retururi procesate după P&L**
-                       - eMAG a procesat retururi care nu apar încă în raportul P&L
-                       - Soluție: Descarcă un P&L mai recent
+                    - **Retururi procesate după P&L** - Comenzile returnate apar în aviz dar nu în P&L
+                    - **Comenzi anulate** - Comenzi stornate după generarea P&L
+                    - **Facturi fără order_id** - API-ul nu a returnat ID-uri pentru unele facturi
+                    - **Ajustări manuale eMAG** - Penalități, bonusuri, corecții
                     
-                    2. **Facturi comision emise ulterior**
-                       - Comisioane suplimentare facturate separat
-                       - Verifică dacă ai primit facturi C-MKTP în aviz
-                    
-                    3. **Comenzi anulate/stornate**
-                       - Comenzi care apar în P&L dar au fost stornate
-                       - Verifică statusul comenzilor în platformă
-                    
-                    4. **Ajustări manuale eMAG**
-                       - Penalități, bonusuri, corecții
-                       - Contactează suportul eMAG pentru detalii
-                    
-                    5. **Perioada diferită**
-                       - Verifică că perioada din P&L coincide exact cu cea din aviz
-                       - eMAG folosește timestamp-uri precise
+                    **Soluție:** Descarcă un P&L mai recent pentru această perioadă
                     """)
                 
-                elif abs(diferenta) >= 1:
-                    st.info("ℹ️ Diferență mică - probabil erori de rotunjire sau comisioane sub 1 RON")
-                
-                else:
-                    st.success("✅ **MATCH PERFECT!** Avizul coincide 100% cu P&L-ul.")
+                elif abs(diferenta) < 1:
+                    st.success("✅ **RECONCILIERE PERFECTĂ!** Avizul coincide 100% cu P&L-ul.")
                 
             except Exception as e:
-                st.error(f"❌ Eroare la reconciliere: {e}")
+                st.error(f"❌ Eroare la procesare: {e}")
                 st.exception(e)
+            finally:
                 if conn:
                     conn.close()
     
     else:
-        st.markdown("""
-        ### 📖 Cum să folosești Reconcilierea:
+        # ═══════════════════════════════════════════════════════
+        # ISTORIC RECONCILIERI (când nu e upload)
+        # ═══════════════════════════════════════════════════════
         
-        1. **Primești aviz de plată** de la eMAG (email sau platformă)
-        2. **Download PDF/Excel** al avizului
-        3. **Upload aici** și completează datele
-        4. **Aplicația calculează automat** din P&L pentru aceeași perioadă
-        5. **Vezi diferențele** și cauzele posibile
+        st.divider()
+        st.subheader("📚 Istoric Reconcilieri")
         
-        ### 💡 Tips:
-        
-        - Asigură-te că ai upload-at **toate rapoartele P&L** pentru perioada avizului
-        - Verifică că **perioada** din aviz coincide exact cu cea selectată
-        - Diferențe sub **5 RON** sunt normale (rotunjiri)
-        - Diferențe peste **10 RON** necesită investigare
-        """)
+        conn = get_db_connection()
+        if conn:
+            try:
+                cursor = conn.cursor(cursor_factory=RealDictCursor)
+                cursor.execute("""
+                    SELECT 
+                        payout_number,
+                        period_start,
+                        period_end,
+                        total_amount,
+                        difference,
+                        is_reconciled,
+                        reconciled_at,
+                        created_at
+                    FROM emag_payout_notices
+                    ORDER BY created_at DESC
+                    LIMIT 10
+                """)
+                
+                payouts = cursor.fetchall()
+                cursor.close()
+                conn.close()
+                
+                if payouts:
+                    df_payouts = pd.DataFrame(payouts)
+                    df_payouts['period_start'] = pd.to_datetime(df_payouts['period_start']).dt.strftime('%d/%m/%Y')
+                    df_payouts['period_end'] = pd.to_datetime(df_payouts['period_end']).dt.strftime('%d/%m/%Y')
+                    df_payouts['created_at'] = pd.to_datetime(df_payouts['created_at']).dt.strftime('%d/%m/%Y %H:%M')
+                    
+                    st.dataframe(df_payouts, use_container_width=True)
+                else:
+                    st.info("📭 Nu există reconcilieri salvate. Upload primul aviz mai sus!")
+                    
+            except Exception as e:
+                st.error(f"❌ Eroare: {e}")
+                if conn:
+                    conn.close()
 
 
 # ═══════════════════════════════════════════════════════

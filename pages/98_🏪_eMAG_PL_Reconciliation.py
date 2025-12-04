@@ -1,9 +1,7 @@
 """
-
 eMAG P&L Reconciliation + Payout PDF Parser + Breakdown Parser
 
 Toate funcționalitățile eMAG într-un singur loc - cu autentificare
-
 """
 
 import streamlit as st
@@ -14,7 +12,7 @@ import hashlib
 import uuid
 from datetime import datetime
 from io import BytesIO
-from sqlalchemy import text  # ← FIX: Import necesar pentru raw SQL
+from sqlalchemy import text
 
 # Setări pagină
 st.set_page_config(
@@ -99,9 +97,8 @@ def filter_year_2025_and_above(df, date_column):
 
     try:
         df_work = df.copy()
-
         df_work[date_column] = pd.to_datetime(
-            df_work[date_column], 
+            df_work[date_column],
             dayfirst=True,
             errors='coerce'
         )
@@ -111,7 +108,7 @@ def filter_year_2025_and_above(df, date_column):
             st.warning(f"⚠️ {nat_count} rânduri au date invalide și vor fi ignorate")
 
         df_filtered = df_work[
-            (df_work[date_column].dt.year >= 2025) & 
+            (df_work[date_column].dt.year >= 2025) &
             (df_work[date_column].notna())
         ].copy()
 
@@ -136,66 +133,40 @@ def upload_pl_to_db(df, conn):
         'errors': 0,
         'error_details': []
     }
-
     batch_id = str(uuid.uuid4())
 
     try:
         df_prepared = df.copy()
-
         column_mapping = {
-            'Data': 'data',
-            'Seller': 'seller',
-            'ID comanda': 'order_id',
-            'ID produs': 'product_id',
-            'EAN': 'ean',
-            'Cod produs (PN)': 'cod_produs_pn',
-            'PNK': 'pnk',
-            'Brand': 'brand',
-            'Produs': 'produs',
-            'Tip desfasurator': 'tip_desfasurator',
-            'Cantitate': 'cantitate',
-            'Vanzari': 'vanzari',
-            'Taxa livrare': 'taxa_livrare',
-            'Taxa retur': 'taxa_retur',
-            'Valoare retinuta': 'valoare_retinuta',
-            'Comision': 'comision',
-            'Comision anulate': 'comision_anulate',
-            'Comision taxa livrare': 'comision_taxa_livrare',
-            'Depozitare FBE': 'depozitare_fbe',
-            'Operatiuni FBE': 'operatiuni_fbe',
-            'Cost livrare': 'cost_livrare',
-            'Cost retur': 'cost_retur',
-            'Vanzari nete': 'vanzari_nete'
+            'Data': 'data', 'Seller': 'seller', 'ID comanda': 'order_id',
+            'ID produs': 'product_id', 'EAN': 'ean', 'Cod produs (PN)': 'cod_produs_pn',
+            'PNK': 'pnk', 'Brand': 'brand', 'Produs': 'produs',
+            'Tip desfasurator': 'tip_desfasurator', 'Cantitate': 'cantitate',
+            'Vanzari': 'vanzari', 'Taxa livrare': 'taxa_livrare',
+            'Taxa retur': 'taxa_retur', 'Valoare retinuta': 'valoare_retinuta',
+            'Comision': 'comision', 'Comision anulate': 'comision_anulate',
+            'Comision taxa livrare': 'comision_taxa_livrare', 'Depozitare FBE': 'depozitare_fbe',
+            'Operatiuni FBE': 'operatiuni_fbe', 'Cost livrare': 'cost_livrare',
+            'Cost retur': 'cost_retur', 'Vanzari nete': 'vanzari_nete'
         }
-
         df_prepared.rename(columns=column_mapping, inplace=True)
         df_prepared['data'] = pd.to_datetime(df_prepared['data'], dayfirst=True).dt.date
         df_prepared['upload_batch_id'] = batch_id
         df_prepared = df_prepared.where(pd.notna(df_prepared), None)
 
-        # FIX: Wrap SQL în text() pentru SQLAlchemy
         insert_query = text("""
             INSERT INTO emag_order_lines (
-                order_id, product_id, tip_desfasurator,
-                data, seller,
-                ean, cod_produs_pn, pnk, brand, produs,
-                cantitate, vanzari, taxa_livrare, taxa_retur,
-                valoare_retinuta, comision, comision_anulate,
-                comision_taxa_livrare, depozitare_fbe, operatiuni_fbe,
-                cost_livrare, cost_retur, vanzari_nete,
+                order_id, product_id, tip_desfasurator, data, seller, ean, cod_produs_pn, pnk, brand, produs,
+                cantitate, vanzari, taxa_livrare, taxa_retur, valoare_retinuta, comision, comision_anulate,
+                comision_taxa_livrare, depozitare_fbe, operatiuni_fbe, cost_livrare, cost_retur, vanzari_nete,
                 upload_batch_id
             ) VALUES (
-                :order_id, :product_id, :tip_desfasurator,
-                :data, :seller,
-                :ean, :cod_produs_pn, :pnk, :brand, :produs,
-                :cantitate, :vanzari, :taxa_livrare, :taxa_retur,
-                :valoare_retinuta, :comision, :comision_anulate,
-                :comision_taxa_livrare, :depozitare_fbe, :operatiuni_fbe,
-                :cost_livrare, :cost_retur, :vanzari_nete,
+                :order_id, :product_id, :tip_desfasurator, :data, :seller, :ean, :cod_produs_pn, :pnk, :brand, :produs,
+                :cantitate, :vanzari, :taxa_livrare, :taxa_retur, :valoare_retinuta, :comision, :comision_anulate,
+                :comision_taxa_livrare, :depozitare_fbe, :operatiuni_fbe, :cost_livrare, :cost_retur, :vanzari_nete,
                 :upload_batch_id
             )
-            ON CONFLICT (order_id, product_id, tip_desfasurator) 
-            DO NOTHING;
+            ON CONFLICT (order_id, product_id, tip_desfasurator) DO NOTHING;
         """)
 
         with conn.session as session:
@@ -208,27 +179,19 @@ def upload_pl_to_db(df, conn):
                         stats['skipped'] += 1
                 except Exception as e:
                     stats['errors'] += 1
-                    stats['error_details'].append({
-                        'row': idx,
-                        'order_id': row.get('order_id'),
-                        'error': str(e)
-                    })
-
+                    stats['error_details'].append({'row': idx, 'order_id': row.get('order_id'), 'error': str(e)})
             session.commit()
-
         return stats
-
     except Exception as e:
         stats['errors'] = stats['total_rows']
         stats['error_details'].append({'global_error': str(e)})
         return stats
 
-
 def get_db_stats(conn):
     """Returnează statistici despre datele din emag_order_lines."""
     try:
         query = """
-            SELECT 
+            SELECT
                 COALESCE(COUNT(*), 0) as total_rows,
                 COALESCE(COUNT(DISTINCT order_id), 0) as total_orders,
                 MIN(data) as min_date,
@@ -238,26 +201,18 @@ def get_db_stats(conn):
                 COALESCE(SUM(vanzari_nete), 0) as total_vanzari_nete
             FROM emag_order_lines;
         """
-
         result = conn.query(query)
         if len(result) > 0:
             stats = result.iloc[0].to_dict()
-            # FIX: Convertește None la 0 pentru toate valorile numerice
             for key in ['total_rows', 'total_orders', 'finalizate', 'stornate', 'total_vanzari_nete']:
                 if stats.get(key) is None:
                     stats[key] = 0
             return stats
         else:
             return {
-                'total_rows': 0,
-                'total_orders': 0,
-                'finalizate': 0,
-                'stornate': 0,
-                'total_vanzari_nete': 0,
-                'min_date': None,
-                'max_date': None
+                'total_rows': 0, 'total_orders': 0, 'finalizate': 0, 'stornate': 0,
+                'total_vanzari_nete': 0, 'min_date': None, 'max_date': None
             }
-
     except Exception as e:
         return {'error': str(e)}
 
@@ -291,17 +246,14 @@ def extract_total_amount(text: str) -> float:
         r'Total[:\s]+([0-9.,]+)\s*RON',
         r'Suma\s+totala[:\s]+([0-9.,]+)\s*RON',
     ]
-
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            amount_str = match.group(1)
-            amount_str = amount_str.replace('.', '').replace(',', '.')
+            amount_str = match.group(1).replace('.', '').replace(',', '.')
             try:
                 return float(amount_str)
             except ValueError:
                 continue
-
     return None
 
 def extract_invoices(text: str) -> list:
@@ -309,19 +261,15 @@ def extract_invoices(text: str) -> list:
     pattern = r'([A-Z]{1,4})-MKTP-(\d+)'
     invoices = []
     seen = set()
-
     lines = text.split('\n')
     for idx, line in enumerate(lines):
         matches = re.finditer(pattern, line)
         for match in matches:
             invoice_number = match.group(0)
-            invoice_type = match.group(1)
-
             if invoice_number in seen:
                 continue
-
             seen.add(invoice_number)
-
+            invoice_type = match.group(1)
             amount = None
             amount_match = re.search(r'([0-9.,]+)\s*RON', line)
             if amount_match:
@@ -330,46 +278,35 @@ def extract_invoices(text: str) -> list:
                     amount = float(amount_str)
                 except ValueError:
                     pass
-
             invoices.append({
-                'invoice_number': invoice_number,
-                'invoice_type': invoice_type,
-                'invoice_amount': amount,
-                'position_in_pdf': idx + 1,
+                'invoice_number': invoice_number, 'invoice_type': invoice_type,
+                'invoice_amount': amount, 'position_in_pdf': idx + 1,
                 'raw_line': line.strip()
             })
-
     return invoices
 
 def extract_payout_info(text: str, filename: str) -> dict:
     """Extrage informații despre payout (ID, date)."""
     info = {
-        'payout_id': None,
-        'payout_date': None,
-        'reference_period_start': None,
-        'reference_period_end': None
+        'payout_id': None, 'payout_date': None,
+        'reference_period_start': None, 'reference_period_end': None
     }
-
     payout_id_title = re.search(r'(\d{4}-\d{10})\s+(?:din|from)', text, re.IGNORECASE)
     if payout_id_title:
         info['payout_id'] = payout_id_title.group(1)
-
     if not info['payout_id']:
         filename_match = re.search(r'_(\d{10,})\.pdf', filename)
         if filename_match:
             info['payout_id'] = filename_match.group(1)
-
     if not info['payout_id']:
         payout_id_match = re.search(r'Payout\s+ID[:\s]+(\d+)', text, re.IGNORECASE)
         if payout_id_match:
             info['payout_id'] = payout_id_match.group(1)
-
     date_patterns = [
         r'(?:from|din)\s+(\d{2}\.\d{2}\.\d{4})',
         r'Data\s+platii?[:\s]+(\d{2}[-/.]\d{2}[-/.]\d{4})',
         r'Payout\s+date[:\s]+(\d{2}[-/.]\d{2}[-/.]\d{4})',
     ]
-
     for pattern in date_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
@@ -382,7 +319,6 @@ def extract_payout_info(text: str, filename: str) -> dict:
                     continue
             if info['payout_date']:
                 break
-
     return info
 
 def parse_payout_pdf(pdf_bytes: bytes, filename: str) -> dict:
@@ -392,23 +328,60 @@ def parse_payout_pdf(pdf_bytes: bytes, filename: str) -> dict:
     payout_info = extract_payout_info(text, filename)
     total_amount = extract_total_amount(text)
     invoices = extract_invoices(text)
-
     pages_count = 0
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
             pages_count = len(pdf.pages)
     except:
         pass
-
     return {
-        'pdf_hash': pdf_hash,
-        'filename': filename,
-        'pages_count': pages_count,
-        'payout_info': payout_info,
-        'total_amount': total_amount,
-        'invoices': invoices,
-        'invoices_count': len(invoices)
+        'pdf_hash': pdf_hash, 'filename': filename, 'pages_count': pages_count,
+        'payout_info': payout_info, 'total_amount': total_amount,
+        'invoices': invoices, 'invoices_count': len(invoices)
     }
+
+def save_payout_to_db(result, conn):
+    """Salvează în DB un payout parsat."""
+    stats = {"inserted_header": 0, "inserted_invoices": 0, "skipped_existing": False, "error": None}
+    try:
+        with conn.session as session:
+            check_q = text("SELECT id FROM emag_payout_header WHERE pdf_hash = :pdf_hash")
+            existing = session.execute(check_q, {"pdf_hash": result["pdf_hash"]}).fetchone()
+            if existing:
+                stats["skipped_existing"] = True
+                return stats
+
+            insert_header = text("""
+                INSERT INTO emag_payout_header (payout_id, payout_date, total_amount, pages_count, filename, pdf_hash)
+                VALUES (:payout_id, :payout_date, :total_amount, :pages_count, :filename, :pdf_hash)
+                RETURNING id;
+            """)
+            payout_info = result["payout_info"]
+            header_id = session.execute(insert_header, {
+                "payout_id": payout_info.get("payout_id"), "payout_date": payout_info.get("payout_date"),
+                "total_amount": result.get("total_amount"), "pages_count": result.get("pages_count"),
+                "filename": result.get("filename"), "pdf_hash": result.get("pdf_hash"),
+            }).scalar()
+            stats["inserted_header"] = 1
+
+            invoices = result.get("invoices", []) or []
+            if invoices:
+                insert_inv = text("""
+                    INSERT INTO emag_payout_invoices (header_id, invoice_number, invoice_type, invoice_amount, position_in_pdf, raw_line)
+                    VALUES (:header_id, :invoice_number, :invoice_type, :invoice_amount, :position_in_pdf, :raw_line);
+                """)
+                for inv in invoices:
+                    session.execute(insert_inv, {
+                        "header_id": header_id, "invoice_number": inv.get("invoice_number"),
+                        "invoice_type": inv.get("invoice_type"), "invoice_amount": inv.get("invoice_amount"),
+                        "position_in_pdf": inv.get("position_in_pdf"), "raw_line": inv.get("raw_line"),
+                    })
+                stats["inserted_invoices"] = len(invoices)
+            session.commit()
+            return stats
+    except Exception as e:
+        stats["error"] = str(e)
+        return stats
 
 # ═══════════════════════════════════════════════════════
 # MAIN APP
@@ -424,58 +397,37 @@ else:
 
 st.divider()
 
-tab1, tab2, tab3 = st.tabs([
-    "📊 Upload P&L",
-    "📄 Payout PDF Parser",
-    "📑 Breakdown Excel Parser"
-])
+tab1, tab2, tab3 = st.tabs(["📊 Upload P&L", "📄 Payout PDF Parser", "📑 Breakdown Excel Parser"])
 
 # ═══════════════════════════════════════════════════════
 # TAB 1: UPLOAD P&L
 # ═══════════════════════════════════════════════════════
-
 with tab1:
     st.header("📊 Upload Profit & Loss")
     st.markdown("Uploadează fișierul Excel cu datele P&L de la eMAG")
-
     st.info("📌 **Notă**: Toate datele anterioare anului 2025 vor fi ignorate automat (format: zz/ll/aaaa)")
-
-    uploaded_file = st.file_uploader(
-        "Selectează fișier Excel",
-        type=['xlsx', 'xls'],
-        key="pl_uploader"
-    )
+    uploaded_file = st.file_uploader("Selectează fișier Excel", type=['xlsx', 'xls'], key="pl_uploader")
 
     if uploaded_file:
         try:
             df = pd.read_excel(uploaded_file)
-
             st.success(f"✅ Fișier încărcat: {uploaded_file.name}")
             st.info(f"📋 Total rânduri inițiale: **{len(df)}**")
-
             date_column = detect_date_column(df)
 
             if date_column:
                 st.info(f"🔍 Coloană date detectată: **{date_column}**")
-
                 with st.expander("🔎 Vezi primele 3 date din fișier"):
                     st.write(df[date_column].head(3).tolist())
-
                 df_filtered, removed, kept = filter_year_2025_and_above(df, date_column)
-
                 if removed > 0:
-                    st.warning(
-                        f"🗑️ **{removed} rânduri eliminate** (< 2025 sau invalide)  |  "
-                        f"✅ **{kept} rânduri păstrate** (2025+)"
-                    )
+                    st.warning(f"🗑️ **{removed} rânduri eliminate** (< 2025 sau invalide)  |  ✅ **{kept} rânduri păstrate** (2025+)")
                 else:
                     st.success(f"✅ Toate {kept} rândurile sunt din 2025+")
-
                 df = df_filtered
             else:
                 st.warning("⚠️ Nu am găsit coloană cu date. Selectează manual:")
                 selected_col = st.selectbox("Selectează coloana cu date:", df.columns.tolist())
-
                 if selected_col:
                     df, removed, kept = filter_year_2025_and_above(df, selected_col)
                     if removed > 0:
@@ -490,12 +442,9 @@ with tab1:
                 st.metric("💾 Dimensiune", f"{uploaded_file.size / 1024:.1f} KB")
 
             st.divider()
-
             st.subheader("👀 Preview Date (primele 10 rânduri)")
             st.dataframe(df.head(10), use_container_width=True)
-
             st.divider()
-
             numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
             if numeric_cols:
                 st.subheader("📊 Statistici coloane numerice")
@@ -503,13 +452,10 @@ with tab1:
 
             st.divider()
             st.subheader("📊 Statistici bază de date")
-
             if conn:
                 db_stats = get_db_stats(conn)
-
                 if 'error' not in db_stats:
                     col1, col2, col3, col4 = st.columns(4)
-
                     with col1:
                         st.metric("📋 Total rânduri în DB", f"{int(db_stats.get('total_rows', 0)):,}")
                     with col2:
@@ -537,44 +483,35 @@ with tab1:
 
             st.divider()
             col1, col2 = st.columns(2)
-
             with col1:
                 if st.button("💾 Salvează în DB", type="primary", key="save_pl"):
                     if conn:
                         with st.spinner("💾 Salvare în PostgreSQL..."):
                             upload_stats = upload_pl_to_db(df, conn)
-
                             if upload_stats['errors'] == 0:
-                                st.success(
-                                    f"✅ **Upload finalizat cu succes!**\n\n"
-                                    f"📊 **{upload_stats['inserted']}** rânduri noi inserate\n"
-                                    f"⏭️ **{upload_stats['skipped']}** rânduri ignorate (duplicate)\n"
-                                    f"📋 **{upload_stats['total_rows']}** total procesate"
-                                )
+                                st.success(f"✅ **Upload finalizat cu succes!**\n\n"
+                                           f"📊 **{upload_stats['inserted']}** rânduri noi inserate\n"
+                                           f"⏭️ **{upload_stats['skipped']}** rânduri ignorate (duplicate)\n"
+                                           f"📋 **{upload_stats['total_rows']}** total procesate")
                                 st.balloons()
                                 st.rerun()
                             else:
-                                st.warning(
-                                    f"⚠️ **Upload completat cu erori**\n\n"
-                                    f"✅ **{upload_stats['inserted']}** inserate\n"
-                                    f"⏭️ **{upload_stats['skipped']}** ignorate\n"
-                                    f"❌ **{upload_stats['errors']}** erori"
-                                )
-
+                                st.warning(f"⚠️ **Upload completat cu erori**\n\n"
+                                           f"✅ **{upload_stats['inserted']}** inserate\n"
+                                           f"⏭️ **{upload_stats['skipped']}** ignorate\n"
+                                           f"❌ **{upload_stats['errors']}** erori")
                                 if upload_stats['error_details']:
                                     with st.expander("📋 Detalii erori"):
                                         for err in upload_stats['error_details'][:10]:
                                             st.error(f"Row {err.get('row')}: {err.get('error')}")
                     else:
                         st.error("❌ DB nu este conectat")
-
             with col2:
                 if st.button("📊 Generează raport", key="report_pl"):
                     st.info("🚧 Funcționalitate în dezvoltare")
 
             st.divider()
             st.subheader("💾 Exportare date filtrate")
-
             csv_buffer = df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Descarcă CSV (filtrat 2025+)",
@@ -582,44 +519,34 @@ with tab1:
                 file_name=f"PL_filtrat_2025_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv"
             )
-
         except Exception as e:
             st.error(f"❌ Eroare la citire: {str(e)}")
             with st.expander("📋 Detalii eroare"):
                 import traceback
                 st.code(traceback.format_exc())
-
     else:
         st.info("👆 Uploadează un fișier Excel pentru a începe")
 
 # ═══════════════════════════════════════════════════════
 # TAB 2: PAYOUT PDF PARSER
 # ═══════════════════════════════════════════════════════
-
 with tab2:
     st.header("📄 Payout PDF Parser")
     st.markdown("""
     Uploadează PDF-ul de payout de la eMAG pentru a extrage:
-
     - 💰 **Suma totală** de plată
     - 📋 **Lista facturilor** (C-MKTP, V-MKTP, etc.)
     - 📅 **Date și perioade** de referință
     """)
-
     st.divider()
-
     uploaded_pdf = st.file_uploader(
-        "Selectează PDF payout",
-        type=['pdf'],
-        key="pdf_uploader",
+        "Selectează PDF payout", type=['pdf'], key="pdf_uploader",
         help="Uploadează avizul de plată (payout notice) de la eMAG"
     )
 
     if uploaded_pdf:
         pdf_bytes = uploaded_pdf.read()
-
         col1, col2, col3 = st.columns(3)
-
         with col1:
             st.metric("📁 Fișier", uploaded_pdf.name)
         with col2:
@@ -627,46 +554,38 @@ with tab2:
         with col3:
             file_hash = calculate_pdf_hash(pdf_bytes)
             st.metric("🔑 Hash", file_hash[:12] + "...")
-
         st.divider()
 
         with st.spinner("🔍 Parsez PDF-ul..."):
             try:
                 result = parse_payout_pdf(pdf_bytes, uploaded_pdf.name)
                 st.success("✅ PDF parsat cu succes!")
-
                 st.subheader("📊 Informații Payout")
 
                 col1, col2, col3, col4 = st.columns(4)
-
                 with col1:
                     payout_id = result['payout_info'].get('payout_id')
                     if payout_id:
                         st.metric("🆔 Payout ID", payout_id)
                     else:
                         st.warning("❌ Payout ID nu a fost găsit")
-
                 with col2:
                     payout_date = result['payout_info'].get('payout_date')
                     if payout_date:
                         st.metric("📅 Data plății", payout_date.strftime("%d.%m.%Y"))
                     else:
                         st.warning("❌ Data nu a fost găsită")
-
                 with col3:
                     total = result.get('total_amount')
                     if total:
                         st.metric("💰 Total", f"{total:,.2f} RON")
                     else:
                         st.warning("❌ Total nu a fost găsit")
-
                 with col4:
                     st.metric("📄 Facturi", result['invoices_count'])
 
                 st.divider()
-
                 st.subheader(f"📋 Facturi Găsite ({result['invoices_count']})")
-
                 if result['invoices']:
                     invoice_types = {}
                     for inv in result['invoices']:
@@ -675,18 +594,8 @@ with tab2:
                             invoice_types[inv_type] = []
                         invoice_types[inv_type].append(inv)
 
-                    type_labels = {
-                        'C': '💼 Comisioane',
-                        'V': '🎟️ Vouchere',
-                        'Y': '🔄 Retururi',
-                        'A': '📢 Ads',
-                        'D': '📦 Diverse'
-                    }
-
-                    tabs = st.tabs([
-                        f"{type_labels.get(t, t)} ({len(invoices)})"
-                        for t, invoices in invoice_types.items()
-                    ])
+                    type_labels = {'C': '💼 Comisioane', 'V': '🎟️ Vouchere', 'Y': '🔄 Retururi', 'A': '📢 Ads', 'D': '📦 Diverse'}
+                    tabs = st.tabs([f"{type_labels.get(t, t)} ({len(invoices)})" for t, invoices in invoice_types.items()])
 
                     for idx, (inv_type, invoices) in enumerate(invoice_types.items()):
                         with tabs[idx]:
@@ -696,42 +605,38 @@ with tab2:
                                 'Poziție': inv['position_in_pdf'],
                                 'Linia din PDF': inv['raw_line'][:80] + '...' if len(inv['raw_line']) > 80 else inv['raw_line']
                             } for inv in invoices])
-
                             st.dataframe(df_inv, use_container_width=True, hide_index=True)
-
                 else:
                     st.warning("⚠️ Nu am găsit facturi în PDF.")
 
                 st.divider()
-
                 with st.expander("🔧 Debug Info"):
                     st.json({
-                        'pdf_hash': result['pdf_hash'],
-                        'pages_count': result['pages_count'],
-                        'payout_info': {
-                            'payout_id': result['payout_info'].get('payout_id'),
-                            'payout_date': str(result['payout_info'].get('payout_date')),
-                        },
-                        'total_amount': result['total_amount'],
-                        'invoices_count': result['invoices_count']
+                        'pdf_hash': result['pdf_hash'], 'pages_count': result['pages_count'],
+                        'payout_info': {'payout_id': result['payout_info'].get('payout_id'), 'payout_date': str(result['payout_info'].get('payout_date'))},
+                        'total_amount': result['total_amount'], 'invoices_count': result['invoices_count']
                     })
 
                 st.divider()
                 st.subheader("⚡ Acțiuni")
-
                 col1, col2, col3 = st.columns(3)
 
                 with col1:
-                    if st.button("💾 Salvează în DB", type="primary", disabled=not conn, key="save_pdf"):
+                    if st.button("💾 Salvează payout în DB", type="primary", disabled=not conn, key="save_payout_db"):
                         if conn:
-                            st.info("🚧 Funcționalitate în dezvoltare")
+                            with st.spinner("💾 Salvez payout-ul în PostgreSQL..."):
+                                save_stats = save_payout_to_db(result, conn)
+                                if save_stats.get("error"):
+                                    st.error(f"❌ Eroare la salvare: {save_stats['error']}")
+                                elif save_stats.get("skipped_existing"):
+                                    st.info("ℹ️ Acest payout există deja în DB (identificat după PDF hash). Nu am inserat din nou.")
+                                else:
+                                    st.success(f"✅ Payout salvat cu succes!\n\n📄 1 header inserat\n📋 {save_stats['inserted_invoices']} facturi inserate")
                         else:
                             st.error("❌ DB nu este conectat")
-
                 with col2:
                     if st.button("🔍 Reconciliază cu Excel", disabled=True, key="reconcile_pdf"):
                         st.info("🚧 Funcționalitate în dezvoltare")
-
                 with col3:
                     if st.button("📊 Raport complet", disabled=True, key="report_pdf"):
                         st.info("🚧 Funcționalitate în dezvoltare")
@@ -741,14 +646,12 @@ with tab2:
                 with st.expander("📋 Detalii eroare"):
                     import traceback
                     st.code(traceback.format_exc())
-
     else:
         st.info("👆 Uploadează un PDF pentru a începe parsarea")
 
 # ═══════════════════════════════════════════════════════
 # TAB 3: BREAKDOWN EXCEL PARSER
 # ═══════════════════════════════════════════════════════
-
 with tab3:
     st.header("📑 Breakdown Excel Parser")
     st.info("🚧 Funcționalitate în dezvoltare - va permite upload desfășurătoare Excel (DC, DV, DP, etc.)")
@@ -756,6 +659,5 @@ with tab3:
 # ═══════════════════════════════════════════════════════
 # FOOTER
 # ═══════════════════════════════════════════════════════
-
 st.divider()
 st.caption("🏪 eMAG Business Intelligence v2.3 COMPLETE FIXED | Mobile Point")

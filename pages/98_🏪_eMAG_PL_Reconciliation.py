@@ -14,7 +14,7 @@ import hashlib
 import uuid
 from datetime import datetime
 from io import BytesIO
-import os
+from sqlalchemy import text  # ← FIX: Import necesar pentru raw SQL
 
 # Setări pagină
 st.set_page_config(
@@ -173,7 +173,8 @@ def upload_pl_to_db(df, conn):
         df_prepared['upload_batch_id'] = batch_id
         df_prepared = df_prepared.where(pd.notna(df_prepared), None)
 
-        insert_query = """
+        # FIX: Wrap SQL în text() pentru SQLAlchemy
+        insert_query = text("""
             INSERT INTO emag_order_lines (
                 order_id, product_id, tip_desfasurator,
                 data, seller,
@@ -184,18 +185,18 @@ def upload_pl_to_db(df, conn):
                 cost_livrare, cost_retur, vanzari_nete,
                 upload_batch_id
             ) VALUES (
-                %(order_id)s, %(product_id)s, %(tip_desfasurator)s,
-                %(data)s, %(seller)s,
-                %(ean)s, %(cod_produs_pn)s, %(pnk)s, %(brand)s, %(produs)s,
-                %(cantitate)s, %(vanzari)s, %(taxa_livrare)s, %(taxa_retur)s,
-                %(valoare_retinuta)s, %(comision)s, %(comision_anulate)s,
-                %(comision_taxa_livrare)s, %(depozitare_fbe)s, %(operatiuni_fbe)s,
-                %(cost_livrare)s, %(cost_retur)s, %(vanzari_nete)s,
-                %(upload_batch_id)s
+                :order_id, :product_id, :tip_desfasurator,
+                :data, :seller,
+                :ean, :cod_produs_pn, :pnk, :brand, :produs,
+                :cantitate, :vanzari, :taxa_livrare, :taxa_retur,
+                :valoare_retinuta, :comision, :comision_anulate,
+                :comision_taxa_livrare, :depozitare_fbe, :operatiuni_fbe,
+                :cost_livrare, :cost_retur, :vanzari_nete,
+                :upload_batch_id
             )
             ON CONFLICT (order_id, product_id, tip_desfasurator) 
             DO NOTHING;
-        """
+        """)
 
         with conn.session as session:
             for idx, row in df_prepared.iterrows():
@@ -241,7 +242,7 @@ def get_db_stats(conn):
         result = conn.query(query)
         if len(result) > 0:
             stats = result.iloc[0].to_dict()
-            # Convertește None la 0 pentru toate valorile numerice
+            # FIX: Convertește None la 0 pentru toate valorile numerice
             for key in ['total_rows', 'total_orders', 'finalizate', 'stornate', 'total_vanzari_nete']:
                 if stats.get(key) is None:
                     stats[key] = 0
@@ -591,8 +592,170 @@ with tab1:
     else:
         st.info("👆 Uploadează un fișier Excel pentru a începe")
 
-# TAB 2 & TAB 3 - păstrate identice cu versiunea anterioară
-# (codul e același, nu îl repet aici pentru brevitate)
+# ═══════════════════════════════════════════════════════
+# TAB 2: PAYOUT PDF PARSER
+# ═══════════════════════════════════════════════════════
+
+with tab2:
+    st.header("📄 Payout PDF Parser")
+    st.markdown("""
+    Uploadează PDF-ul de payout de la eMAG pentru a extrage:
+
+    - 💰 **Suma totală** de plată
+    - 📋 **Lista facturilor** (C-MKTP, V-MKTP, etc.)
+    - 📅 **Date și perioade** de referință
+    """)
+
+    st.divider()
+
+    uploaded_pdf = st.file_uploader(
+        "Selectează PDF payout",
+        type=['pdf'],
+        key="pdf_uploader",
+        help="Uploadează avizul de plată (payout notice) de la eMAG"
+    )
+
+    if uploaded_pdf:
+        pdf_bytes = uploaded_pdf.read()
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric("📁 Fișier", uploaded_pdf.name)
+        with col2:
+            st.metric("📊 Dimensiune", f"{len(pdf_bytes) / 1024:.1f} KB")
+        with col3:
+            file_hash = calculate_pdf_hash(pdf_bytes)
+            st.metric("🔑 Hash", file_hash[:12] + "...")
+
+        st.divider()
+
+        with st.spinner("🔍 Parsez PDF-ul..."):
+            try:
+                result = parse_payout_pdf(pdf_bytes, uploaded_pdf.name)
+                st.success("✅ PDF parsat cu succes!")
+
+                st.subheader("📊 Informații Payout")
+
+                col1, col2, col3, col4 = st.columns(4)
+
+                with col1:
+                    payout_id = result['payout_info'].get('payout_id')
+                    if payout_id:
+                        st.metric("🆔 Payout ID", payout_id)
+                    else:
+                        st.warning("❌ Payout ID nu a fost găsit")
+
+                with col2:
+                    payout_date = result['payout_info'].get('payout_date')
+                    if payout_date:
+                        st.metric("📅 Data plății", payout_date.strftime("%d.%m.%Y"))
+                    else:
+                        st.warning("❌ Data nu a fost găsită")
+
+                with col3:
+                    total = result.get('total_amount')
+                    if total:
+                        st.metric("💰 Total", f"{total:,.2f} RON")
+                    else:
+                        st.warning("❌ Total nu a fost găsit")
+
+                with col4:
+                    st.metric("📄 Facturi", result['invoices_count'])
+
+                st.divider()
+
+                st.subheader(f"📋 Facturi Găsite ({result['invoices_count']})")
+
+                if result['invoices']:
+                    invoice_types = {}
+                    for inv in result['invoices']:
+                        inv_type = inv['invoice_type']
+                        if inv_type not in invoice_types:
+                            invoice_types[inv_type] = []
+                        invoice_types[inv_type].append(inv)
+
+                    type_labels = {
+                        'C': '💼 Comisioane',
+                        'V': '🎟️ Vouchere',
+                        'Y': '🔄 Retururi',
+                        'A': '📢 Ads',
+                        'D': '📦 Diverse'
+                    }
+
+                    tabs = st.tabs([
+                        f"{type_labels.get(t, t)} ({len(invoices)})"
+                        for t, invoices in invoice_types.items()
+                    ])
+
+                    for idx, (inv_type, invoices) in enumerate(invoice_types.items()):
+                        with tabs[idx]:
+                            df_inv = pd.DataFrame([{
+                                'Număr factură': inv['invoice_number'],
+                                'Sumă (RON)': f"{inv['invoice_amount']:,.2f}" if inv['invoice_amount'] else 'N/A',
+                                'Poziție': inv['position_in_pdf'],
+                                'Linia din PDF': inv['raw_line'][:80] + '...' if len(inv['raw_line']) > 80 else inv['raw_line']
+                            } for inv in invoices])
+
+                            st.dataframe(df_inv, use_container_width=True, hide_index=True)
+
+                else:
+                    st.warning("⚠️ Nu am găsit facturi în PDF.")
+
+                st.divider()
+
+                with st.expander("🔧 Debug Info"):
+                    st.json({
+                        'pdf_hash': result['pdf_hash'],
+                        'pages_count': result['pages_count'],
+                        'payout_info': {
+                            'payout_id': result['payout_info'].get('payout_id'),
+                            'payout_date': str(result['payout_info'].get('payout_date')),
+                        },
+                        'total_amount': result['total_amount'],
+                        'invoices_count': result['invoices_count']
+                    })
+
+                st.divider()
+                st.subheader("⚡ Acțiuni")
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    if st.button("💾 Salvează în DB", type="primary", disabled=not conn, key="save_pdf"):
+                        if conn:
+                            st.info("🚧 Funcționalitate în dezvoltare")
+                        else:
+                            st.error("❌ DB nu este conectat")
+
+                with col2:
+                    if st.button("🔍 Reconciliază cu Excel", disabled=True, key="reconcile_pdf"):
+                        st.info("🚧 Funcționalitate în dezvoltare")
+
+                with col3:
+                    if st.button("📊 Raport complet", disabled=True, key="report_pdf"):
+                        st.info("🚧 Funcționalitate în dezvoltare")
+
+            except Exception as e:
+                st.error(f"❌ Eroare la parsare: {str(e)}")
+                with st.expander("📋 Detalii eroare"):
+                    import traceback
+                    st.code(traceback.format_exc())
+
+    else:
+        st.info("👆 Uploadează un PDF pentru a începe parsarea")
+
+# ═══════════════════════════════════════════════════════
+# TAB 3: BREAKDOWN EXCEL PARSER
+# ═══════════════════════════════════════════════════════
+
+with tab3:
+    st.header("📑 Breakdown Excel Parser")
+    st.info("🚧 Funcționalitate în dezvoltare - va permite upload desfășurătoare Excel (DC, DV, DP, etc.)")
+
+# ═══════════════════════════════════════════════════════
+# FOOTER
+# ═══════════════════════════════════════════════════════
 
 st.divider()
-st.caption("🏪 eMAG Business Intelligence v2.2 FIXED | Mobile Point")
+st.caption("🏪 eMAG Business Intelligence v2.3 COMPLETE FIXED | Mobile Point")

@@ -162,16 +162,24 @@ def extract_payout_info(text: str, filename: str) -> dict:
         'reference_period_end': None
     }
     
-    # Payout ID din nume sau text
-    filename_match = re.search(r'_(\d{8,})\.pdf', filename)
-    if filename_match:
-        info['payout_id'] = int(filename_match.group(1))
+    # ✅ PATTERN 1: Payout ID din TITLU PDF (ex: "2026-4100309867 din | from 18.11.2025")
+    payout_id_title = re.search(r'(\d{4}-\d{10})\s+(?:din|from)', text, re.IGNORECASE)
+    if payout_id_title:
+        info['payout_id'] = int(payout_id_title.group(1).replace('-', ''))
     
-    payout_id_match = re.search(r'Payout\s+ID[:\s]+(\d+)', text, re.IGNORECASE)
-    if payout_id_match:
-        info['payout_id'] = int(payout_id_match.group(1))
+    # PATTERN 2: Payout ID din nume fișier (fallback)
+    if not info['payout_id']:
+        filename_match = re.search(r'_(\d{10,})\.pdf', filename)
+        if filename_match:
+            info['payout_id'] = int(filename_match.group(1))
     
-    # ✅ PATTERN NOU - caută "from DD.MM.YYYY" sau "din DD.MM.YYYY"
+    # PATTERN 3: Payout ID din text clasic (fallback)
+    if not info['payout_id']:
+        payout_id_match = re.search(r'Payout\s+ID[:\s]+(\d+)', text, re.IGNORECASE)
+        if payout_id_match:
+            info['payout_id'] = int(payout_id_match.group(1))
+    
+    # ✅ Extragere DATA - caută "from DD.MM.YYYY" sau "din DD.MM.YYYY"
     date_patterns = [
         r'(?:from|din)\s+(\d{2}\.\d{2}\.\d{4})',  # from 18.11.2025
         r'Data\s+platii?[:\s]+(\d{2}[-/.]\d{2}[-/.]\d{4})',
@@ -193,6 +201,7 @@ def extract_payout_info(text: str, filename: str) -> dict:
                 break
     
     return info
+
 
 
 

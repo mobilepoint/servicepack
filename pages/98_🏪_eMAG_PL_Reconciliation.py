@@ -746,14 +746,35 @@ def detect_breakdown_type_from_payout(invoice_number: str,
         return "DP_COD"      # încasări ramburs – legăm de fișierele DP COD
     if "card" in label or "online card" in label or "incasari card" in label:
         return "DP_CARD"     # încasări card – legăm de fișierele DP CO
-    if 'co ' in filename_lower or 'online_card' in filename_lower:
-        return 'DP_CARD'
-    if 'cod ' in filename_lower or 'cash_on_delivery' in filename_lower:
-        return 'DP_COD'
+#     if 'co ' in filename_lower or 'online_card' in filename_lower:
+#     return 'DP_CARD'
+#     if 'cod ' in filename_lower or 'cash_on_delivery' in filename_lower:
+#     return 'DP_COD'
 
     # 3. Fallback
     return "UNKNOWN"
 
+
+
+def detect_breakdown_type(filename: str) -> str:
+    """Detectează tipul fișierului din nume (ex: DC, DV, DP, DY, DP_CARD, DP_COD)."""
+    filename_lower = filename.lower()
+    
+    # Logic retrieved from misplaced code
+    if 'co ' in filename_lower or 'online_card' in filename_lower:
+        return 'DP_CARD'
+    if 'cod ' in filename_lower or 'cash_on_delivery' in filename_lower:
+        return 'DP_COD'
+        
+    # Standard types based on prefixes/substrings
+    if 'dc' in filename_lower: return 'DC'
+    if 'dv' in filename_lower: return 'DV'
+    if 'dy' in filename_lower: return 'DY'
+    if 'dhdr' in filename_lower: return 'DHDR'
+    if 'ded' in filename_lower: return 'DED'
+    if 'dp' in filename_lower: return 'DP'
+    
+    return 'UNKNOWN'
 
 def parse_breakdown_excel(file_bytes, filename: str, breakdown_type: str) -> pd.DataFrame:
     """Parsează un fișier Excel desfășurător și returnează DataFrame normalizat."""

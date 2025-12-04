@@ -541,7 +541,7 @@ with tab1:
             with col1:
                if st.button("💾 Salvează în DB", type="primary", disabled=not conn, key="save_pdf"):
                if conn:
-            with st.spinner("💾 Salvez payout-ul în PostgreSQL..."):
+             with st.spinner("💾 Salvez payout-ul în PostgreSQL..."):
                 save_stats = save_payout_to_db(result, conn)
 
                 if save_stats.get("error"):

@@ -66,8 +66,8 @@ def init_supabase():
     try:
         from supabase import create_client
         return create_client(
-            st.secrets["supabase"]["url"],
-            st.secrets["supabase"]["key"]
+            st.secrets["SUPABASE_URL"],
+            st.secrets["SUPABASE_KEY"]
         )
     except Exception as e:
         st.error(f"⚠️ Eroare conexiune Supabase: {e}")

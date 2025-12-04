@@ -401,9 +401,14 @@ def save_payout_to_db(result, conn):
             invoices = result.get("invoices", []) or []
             if invoices:
                 insert_inv = text("""
-                    INSERT INTO emag_payout_invoices 
-                    (header_id, invoice_number, invoice_type, invoice_amount, position_in_pdf, raw_line)
-                    VALUES (:header_id, :invoice_number, :invoice_type, :invoice_amount, :position_in_pdf, :raw_line);
+                    INSERT INTO emag_payout_invoices (
+                        header_id, invoice_number, invoice_type, invoice_amount,
+                        position_in_pdf, raw_line, invoice_label
+                    )
+                    VALUES (
+                        :header_id, :invoice_number, :invoice_type, :invoice_amount,
+                        :position_in_pdf, :raw_line, :invoice_label
+                    );
                 """)
                 for inv in invoices:
                     session.execute(insert_inv, {
@@ -413,6 +418,7 @@ def save_payout_to_db(result, conn):
                         "invoice_amount": inv.get("invoice_amount"),
                         "position_in_pdf": inv.get("position_in_pdf"),
                         "raw_line": inv.get("raw_line"),
+                         "invoice_label": inv.get("invoice_label"),
                     })
                 stats["inserted_invoices"] = len(invoices)
             
@@ -653,10 +659,24 @@ with tab2:
                 st.divider()
                 with st.expander("🔧 Debug Info"):
                     st.json({
-                        'pdf_hash': result['pdf_hash'], 'pages_count': result['pages_count'],
-                        'payout_info': {'payout_id': result['payout_info'].get('payout_id'), 'payout_date': str(result['payout_info'].get('payout_date'))},
-                        'total_amount': result['total_amount'], 'invoices_count': result['invoices_count']
+                        'pdf_hash': result['pdf_hash'],
+                        'pages_count': result['pages_count'],
+                        'payout_info': {
+                            'payout_id': result['payout_info'].get('payout_id'),
+                            'payout_date': str(result['payout_info'].get('payout_date'))
+                        },
+                        'total_amount': result['total_amount'],
+                        'invoices_count': result['invoices_count'],
+                        'invoices': [
+                            {
+                                'invoice_number': inv['invoice_number'],
+                                'invoice_type': inv['invoice_type'],
+                                'invoice_amount': inv['invoice_amount'],
+                                'label': inv.get('invoice_label')
+                            } for inv in result['invoices']
+                        ]
                     })
+
 
                 st.divider()
                 st.subheader("⚡ Acțiuni")
@@ -694,26 +714,46 @@ with tab2:
 # HELPER FUNCTIONS - BREAKDOWN PARSING
 # ═══════════════════════════════════════════════════════
 
-def detect_breakdown_type(filename: str) -> str:
-    """Detectează tipul desfășurător din numele fișierului."""
-    filename_lower = filename.lower()
-    
-    if '_dc_' in filename_lower or 'commission' in filename_lower:
-        return 'DC'
-    elif '_dv_' in filename_lower or 'voucher' in filename_lower:
-        return 'DV'
-    elif '_dp_' in filename_lower or 'payout' in filename_lower or 'plati' in filename_lower:
-        return 'DP'
-    elif '_dy_' in filename_lower or 'return' in filename_lower or 'retur' in filename_lower:
-        return 'DY'
-    elif '_dhdr_' in filename_lower or 'hdr' in filename_lower:
-        return 'DHDR'
-    elif '_dcs_' in filename_lower or 'storno' in filename_lower:
-        return 'DCS'
-    elif '_ded_' in filename_lower or 'delivery' in filename_lower or 'expediere' in filename_lower:
-        return 'DED'
-    else:
-        return 'UNKNOWN'
+def detect_breakdown_type_from_payout(invoice_number: str,
+                                      invoice_type: str | None,
+                                      invoice_label: str | None) -> str:
+    """
+    Determină tipul desfășurătorului (DC/DV/DP/DY/DHDR/DED/CO/COD)
+    pe baza numărului de factură, a tipului și a descrierii din payout.
+    """
+    num = (invoice_number or "").upper()
+    t = (invoice_type or "").upper()
+    label = (invoice_label or "").lower()
+
+    # 1. Reguli clasice după prefix factură
+    if num.startswith("C-MKTP") or t == "C":
+        return "DC"          # comisioane
+    if num.startswith("V-MKTP") or t == "V":
+        return "DV"          # vouchere
+    if num.startswith("Y-MKTP") or t == "Y":
+        return "DY"          # retururi
+    if num.startswith("H-MKTP") or t == "H":
+        return "DHDR"        # compensări / daune
+    if num.startswith("E-MKTP") or t == "E":
+        return "DP"          # încasări payout standard
+    if "STORNO" in label or "stornare" in label:
+        return "DCS"         # stornări comision
+    if "livrare" in label or "delivery" in label or "expediere" in label:
+        return "DED"         # delivery
+
+    # 2. Facturi fără prefix, doar descriere (încasări ramburs / card etc.)
+    if "ramburs" in label or "cash on delivery" in label or "cod" in label:
+        return "DP_COD"      # încasări ramburs – legăm de fișierele DP COD
+    if "card" in label or "online card" in label or "incasari card" in label:
+        return "DP_CARD"     # încasări card – legăm de fișierele DP CO
+    if 'co ' in filename_lower or 'online_card' in filename_lower:
+    return 'DP_CARD'
+    if 'cod ' in filename_lower or 'cash_on_delivery' in filename_lower:
+    return 'DP_COD'
+
+    # 3. Fallback
+    return "UNKNOWN"
+
 
 def parse_breakdown_excel(file_bytes, filename: str, breakdown_type: str) -> pd.DataFrame:
     """Parsează un fișier Excel desfășurător și returnează DataFrame normalizat."""
@@ -886,15 +926,20 @@ def get_payout_invoices(payout_id: str, conn):
     """Returnează facturile pentru un payout."""
     try:
         query = text("""
-            SELECT i.invoice_number, i.invoice_type, i.invoice_amount
+            SELECT 
+                i.invoice_number,
+                i.invoice_type,
+                i.invoice_amount,
+                i.invoice_label
             FROM emag_payout_invoices i
             JOIN emag_payout_header h ON h.id = i.header_id
             WHERE h.payout_id = :payout_id
-            ORDER BY i.invoice_type, i.invoice_number;
+            ORDER BY i.invoice_type NULLS LAST, i.invoice_number;
         """)
         with conn.session as session:
             result = session.execute(query, {'payout_id': payout_id})
-            return pd.DataFrame(result.fetchall(), columns=['invoice_number', 'invoice_type', 'invoice_amount'])
+            return pd.DataFrame(result.fetchall(), 
+                columns=['invoice_number', 'invoice_type', 'invoice_amount', 'invoice_label'])
     except Exception as e:
         st.error(f"Eroare la citire facturi: {str(e)}")
         return pd.DataFrame()
@@ -964,8 +1009,9 @@ with tab3:
                 lambda x: f"{x:,.2f} RON" if pd.notna(x) else 'N/A'
             )
             
+            invoices_df['Label'] = invoices_df['invoice_label'].fillna('').str.slice(0, 60)
             st.dataframe(
-                invoices_df[['invoice_number', 'Tip', 'Sumă']],
+                invoices_df[['invoice_number', 'Tip', 'Sumă', 'Label']],
                 use_container_width=True,
                 hide_index=True
             )
@@ -995,12 +1041,19 @@ with tab3:
                 # Preview fișiere
                 breakdown_info = []
                 for file in uploaded_breakdowns:
-                    bd_type = detect_breakdown_type(file.name)
+                    # tip din nume fișier
+                    bd_type_filename = detect_breakdown_type(file.name)
+
+                    # dacă user-ul alege deja o factură, poți calcula și tipul sugerat din payout:
+                    # (exemplu simplu: folosim prima factură ca hint; după ce legi pe factură reală, poți recalcula)
+                    suggested_type = bd_type_filename  # fallback
                     breakdown_info.append({
                         'Fișier': file.name,
-                        'Tip detectat': bd_type,
+                        'Tip fișier': bd_type_filename,
+                        'Tip sugerat payout': suggested_type,
                         'Dimensiune': f"{file.size / 1024:.1f} KB"
                     })
+
                 
                 st.dataframe(pd.DataFrame(breakdown_info), use_container_width=True, hide_index=True)
                 
@@ -1028,6 +1081,13 @@ with tab3:
                             label_visibility="collapsed"
                         )
                         file_invoice_mapping[file.name] = selected_invoice
+                        inv_row = invoices_df[invoices_df['invoice_number'] == selected_invoice].iloc[0]
+                        suggested_type = detect_breakdown_type_from_payout(
+                            invoice_number=inv_row['invoice_number'],
+                            invoice_type=inv_row['invoice_type'],
+                            invoice_label=inv_row.get('invoice_label')
+                        )
+                        st.caption(f"Tip sugerat din payout: **{suggested_type}**")
                 
                 st.divider()
                 

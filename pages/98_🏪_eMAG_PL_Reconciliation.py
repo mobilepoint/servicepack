@@ -1,4 +1,4 @@
-a"""
+"""
 eMAG P&L Reconciliation + Payout PDF Parser + Breakdown Parser
 
 Toate funcționalitățile eMAG într-un singur loc - cu autentificare
@@ -490,12 +490,12 @@ with tab1:
 
             st.divider()
             st.subheader("👀 Preview Date (primele 10 rânduri)")
-            st.dataframe(df.head(10), width='stretch')
+            st.dataframe(df.head(10), use_container_width=True)
             st.divider()
             numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
             if numeric_cols:
                 st.subheader("📊 Statistici coloane numerice")
-                st.dataframe(df[numeric_cols].describe(), width='stretch')
+                st.dataframe(df[numeric_cols].describe(), use_container_width=True)
 
             st.divider()
             st.subheader("📊 Statistici bază de date")
@@ -652,7 +652,7 @@ with tab2:
                                 'Poziție': inv['position_in_pdf'],
                                 'Linia din PDF': inv['raw_line'][:80] + '...' if len(inv['raw_line']) > 80 else inv['raw_line']
                             } for inv in invoices])
-                            st.dataframe(df_inv, width='stretch', hide_index=True)
+                            st.dataframe(df_inv, use_container_width=True, hide_index=True)
                 else:
                     st.warning("⚠️ Nu am găsit facturi în PDF.")
 
@@ -1026,7 +1026,7 @@ with tab3:
             invoices_df['Label'] = invoices_df['invoice_label'].fillna('').str.slice(0, 60)
             st.dataframe(
                 invoices_df[['invoice_number', 'Tip', 'Sumă', 'Label']],
-                width='stretch',
+                use_container_width=True,
                 hide_index=True
             )
             
@@ -1069,7 +1069,7 @@ with tab3:
                     })
 
                 
-                st.dataframe(pd.DataFrame(breakdown_info), width='stretch', hide_index=True)
+                st.dataframe(pd.DataFrame(breakdown_info), use_container_width=True, hide_index=True)
                 
                 st.divider()
                 
@@ -1194,7 +1194,7 @@ with tab3:
                                 lambda x: '✅ OK' if abs(x) < 0.01 else '⚠️ Diferență'
                             )
                             
-                            st.dataframe(reconcile_df, width='stretch', hide_index=True)
+                            st.dataframe(reconcile_df, use_container_width=True, hide_index=True)
                             
                             # Profit query
                             st.subheader("💰 Raport Profit")
@@ -1231,7 +1231,7 @@ with tab3:
                                     margin = (total_profit / total_vanzari * 100) if total_vanzari > 0 else 0
                                     st.metric("📊 Marjă Profit", f"{margin:.1f}%")
                                 
-                                st.dataframe(profit_df.head(50), width='stretch', hide_index=True)
+                                st.dataframe(profit_df.head(50), use_container_width=True, hide_index=True)
                         else:
                             st.info("Nu există date de reconciliere pentru acest payout.")
         else:
@@ -1244,6 +1244,7 @@ st.divider()
 st.caption("🏪 eMAG Business Intelligence v2.3 COMPLETE FIXED | Mobile Point")
 
 
+# --- NEW UI LOGIC ---
 st.title("Reconciliere eMAG P&L vs. Desfășurătoare")
 
 st.info("**Proces:** Încarcă fișierul P&L și apoi toate desfășurătoarele corespunzătoare. Aplicația va încerca să confirme fiecare linie din P&L.")
@@ -1263,7 +1264,8 @@ if pl_file:
         if 'Order ID' in st.session_state.pl_df.columns:
             st.session_state.pl_df.rename(columns={'Order ID': 'comanda_id'}, inplace=True)
         st.success(f"Fișierul P&L a fost încărcat și procesat. {len(st.session_state.pl_df)} înregistrări găsite.")
-        st.dataframe(st.session_state.pl_df.head(), width='stretch')
+        # Use stretch width
+        st.dataframe(st.session_state.pl_df.head(), width=None) 
     except Exception as e:
         st.error(f"A apărut o eroare la procesarea fișierului P&L: {e}")
         st.session_state.pl_df = None
@@ -1281,11 +1283,15 @@ if st.button("▶️ Pornește Reconcilierea", disabled=(not pl_file or not brea
             all_breakdowns_df = []
             for file in breakdown_files:
                 try:
+                    # Detect type
                     breakdown_type = detect_breakdown_type(file.name)
+                    # Parse
                     df = parse_breakdown_excel(file, file.name, breakdown_type)
-                    # ASSUMPTION: The parsing function returns a DataFrame containing a key like 'Comanda ID'.
+
+                    # Rename key column if needed
                     if 'Comanda ID' in df.columns:
                          df.rename(columns={'Comanda ID': 'comanda_id'}, inplace=True)
+
                     all_breakdowns_df.append(df)
                 except Exception as e:
                     st.warning(f"Nu am putut procesa fișierul {file.name}: {e}")
@@ -1293,7 +1299,7 @@ if st.button("▶️ Pornește Reconcilierea", disabled=(not pl_file or not brea
             if all_breakdowns_df:
                 master_breakdown_df = pd.concat(all_breakdowns_df, ignore_index=True)
 
-                # ASSUMPTION: The key for merging is 'comanda_id'. This is CRITICAL.
+                # Key column check
                 key_column = 'comanda_id'
 
                 if key_column not in st.session_state.pl_df.columns:
@@ -1304,6 +1310,7 @@ if st.button("▶️ Pornește Reconcilierea", disabled=(not pl_file or not brea
                     st.info(f"Am procesat {len(master_breakdown_df)} înregistrări din {len(breakdown_files)} fișiere desfășurător.")
 
                     # Perform the reconciliation
+                    # We only care if the P&L order exists in the breakdowns
                     reconciled_df = pd.merge(
                         st.session_state.pl_df,
                         master_breakdown_df[[key_column]].drop_duplicates(),
@@ -1322,7 +1329,7 @@ if st.button("▶️ Pornește Reconcilierea", disabled=(not pl_file or not brea
                     st.metric("Grad de Confirmare", f"{confirmed_count} / {total_count} înregistrări P&L")
 
                     # Display detailed results
-                    st.dataframe(reconciled_df, width='stretch')
+                    st.dataframe(reconciled_df, width=None)
 
                     st.session_state.reconciled_df = reconciled_df # Save for download
 
@@ -1339,4 +1346,3 @@ if 'reconciled_df' in st.session_state and st.session_state.reconciled_df is not
         file_name='reconciliere_p&l_vs_breakdowns.csv',
         mime='text/csv',
     )
-

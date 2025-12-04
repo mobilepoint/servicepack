@@ -171,8 +171,9 @@ def extract_payout_info(text: str, filename: str) -> dict:
     if payout_id_match:
         info['payout_id'] = int(payout_id_match.group(1))
     
-    # Date
+    # ✅ PATTERN NOU - caută "from DD.MM.YYYY" sau "din DD.MM.YYYY"
     date_patterns = [
+        r'(?:from|din)\s+(\d{2}\.\d{2}\.\d{4})',  # from 18.11.2025
         r'Data\s+platii?[:\s]+(\d{2}[-/.]\d{2}[-/.]\d{4})',
         r'Payout\s+date[:\s]+(\d{2}[-/.]\d{2}[-/.]\d{4})',
     ]
@@ -181,7 +182,8 @@ def extract_payout_info(text: str, filename: str) -> dict:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             date_str = match.group(1)
-            for date_format in ['%d-%m-%Y', '%d.%m.%Y', '%d/%m/%Y']:
+            # Încearcă multiple formate
+            for date_format in ['%d.%m.%Y', '%d-%m-%Y', '%d/%m/%Y']:
                 try:
                     info['payout_date'] = datetime.strptime(date_str, date_format).date()
                     break
@@ -191,6 +193,7 @@ def extract_payout_info(text: str, filename: str) -> dict:
                 break
     
     return info
+
 
 
 def parse_payout_pdf(pdf_bytes: bytes, filename: str) -> dict:

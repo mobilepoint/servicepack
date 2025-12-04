@@ -262,6 +262,7 @@ def extract_invoices(text: str) -> list:
     invoices = []
     seen = set()
     lines = text.split('\n')
+    
     for idx, line in enumerate(lines):
         matches = re.finditer(pattern, line)
         for match in matches:
@@ -269,21 +270,45 @@ def extract_invoices(text: str) -> list:
             if invoice_number in seen:
                 continue
             seen.add(invoice_number)
+            
             invoice_type = match.group(1)
             amount = None
-            amount_match = re.search(r'([0-9.,]+)\s*RON', line)
-            if amount_match:
-                amount_str = amount_match.group(1).replace('.', '').replace(',', '.')
-                try:
-                    amount = float(amount_str)
-                except ValueError:
-                    pass
+            
+            # Îmbunătățit: caută suma în mai multe formate
+            amount_patterns = [
+                r'(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})\s*RON',  # 1.234,56 RON sau 1,234.56 RON
+                r'RON\s*(\d{1,3}(?:[.,]\d{3})*[.,]\d{2})',  # RON 1.234,56
+                r'(\d+[.,]\d{2})\s*RON',                      # 123,45 RON simplu
+                r'(\d+[.,]\d{2})$',                           # 123,45 la sfârșitul liniei
+            ]
+            
+            for amt_pattern in amount_patterns:
+                amount_match = re.search(amt_pattern, line)
+                if amount_match:
+                    amount_str = amount_match.group(1)
+                    # Normalizează: elimină separatorii de mii, înlocuiește virgula cu punct
+                    if ',' in amount_str and '.' in amount_str:
+                        # Format european: 1.234,56
+                        amount_str = amount_str.replace('.', '').replace(',', '.')
+                    elif ',' in amount_str:
+                        # Doar virgulă: 1234,56
+                        amount_str = amount_str.replace(',', '.')
+                    try:
+                        amount = float(amount_str)
+                        break
+                    except ValueError:
+                        continue
+            
             invoices.append({
-                'invoice_number': invoice_number, 'invoice_type': invoice_type,
-                'invoice_amount': amount, 'position_in_pdf': idx + 1,
+                'invoice_number': invoice_number,
+                'invoice_type': invoice_type,
+                'invoice_amount': amount,
+                'position_in_pdf': idx + 1,
                 'raw_line': line.strip()
             })
+    
     return invoices
+
 
 def extract_payout_info(text: str, filename: str) -> dict:
     """Extrage informații despre payout (ID, date)."""

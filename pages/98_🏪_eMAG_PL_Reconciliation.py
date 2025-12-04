@@ -1,4 +1,4 @@
-"""
+a"""
 eMAG P&L Reconciliation + Payout PDF Parser + Breakdown Parser
 
 Toate funcționalitățile eMAG într-un singur loc - cu autentificare
@@ -759,21 +759,14 @@ def detect_breakdown_type_from_payout(invoice_number: str,
 def detect_breakdown_type(filename: str) -> str:
     """Detectează tipul fișierului din nume (ex: DC, DV, DP, DY, DP_CARD, DP_COD)."""
     filename_lower = filename.lower()
-    
-    # Logic retrieved from misplaced code
-    if 'co ' in filename_lower or 'online_card' in filename_lower:
-        return 'DP_CARD'
-    if 'cod ' in filename_lower or 'cash_on_delivery' in filename_lower:
-        return 'DP_COD'
-        
-    # Standard types based on prefixes/substrings
+    if 'co ' in filename_lower or 'online_card' in filename_lower: return 'DP_CARD'
+    if 'cod ' in filename_lower or 'cash_on_delivery' in filename_lower: return 'DP_COD'
     if 'dc' in filename_lower: return 'DC'
     if 'dv' in filename_lower: return 'DV'
     if 'dy' in filename_lower: return 'DY'
     if 'dhdr' in filename_lower: return 'DHDR'
     if 'ded' in filename_lower: return 'DED'
     if 'dp' in filename_lower: return 'DP'
-    
     return 'UNKNOWN'
 
 def parse_breakdown_excel(file_bytes, filename: str, breakdown_type: str) -> pd.DataFrame:
@@ -1249,3 +1242,101 @@ with tab3:
 # ═══════════════════════════════════════════════════════
 st.divider()
 st.caption("🏪 eMAG Business Intelligence v2.3 COMPLETE FIXED | Mobile Point")
+
+
+st.title("Reconciliere eMAG P&L vs. Desfășurătoare")
+
+st.info("**Proces:** Încarcă fișierul P&L și apoi toate desfășurătoarele corespunzătoare. Aplicația va încerca să confirme fiecare linie din P&L.")
+
+# --- Pasul 1: Upload P&L ---
+st.header("1. Încarcă fișierul Profit & Loss (.xlsx)")
+pl_file = st.file_uploader("Selectează fișierul P&L generat de pe eMAG Marketplace", type=["xlsx"])
+
+if 'pl_df' not in st.session_state:
+    st.session_state.pl_df = None
+
+if pl_file:
+    try:
+        st.session_state.pl_df = parse_pl_excel(pl_file)
+        # ASSUMPTION: The parsing function returns a DataFrame and we need to standardize the key column.
+        # Let's assume the key is 'Order ID' and rename it for consistency.
+        if 'Order ID' in st.session_state.pl_df.columns:
+            st.session_state.pl_df.rename(columns={'Order ID': 'comanda_id'}, inplace=True)
+        st.success(f"Fișierul P&L a fost încărcat și procesat. {len(st.session_state.pl_df)} înregistrări găsite.")
+        st.dataframe(st.session_state.pl_df.head(), width='stretch')
+    except Exception as e:
+        st.error(f"A apărut o eroare la procesarea fișierului P&L: {e}")
+        st.session_state.pl_df = None
+
+# --- Pasul 2: Upload Desfășurătoare ---
+st.header("2. Încarcă fișierele Desfășurător (.xlsx)")
+breakdown_files = st.file_uploader("Selectează unul sau mai multe fișiere Excel de tip desfășurător", type=["xlsx"], accept_multiple_files=True)
+
+# --- Pasul 3: Reconciliere ---
+st.header("3. Rulează Reconcilierea")
+
+if st.button("▶️ Pornește Reconcilierea", disabled=(not pl_file or not breakdown_files)):
+    if st.session_state.pl_df is not None and breakdown_files:
+        with st.spinner("Se procesează desfășurătoarele și se rulează reconcilierea..."):
+            all_breakdowns_df = []
+            for file in breakdown_files:
+                try:
+                    breakdown_type = detect_breakdown_type(file.name)
+                    df = parse_breakdown_excel(file, file.name, breakdown_type)
+                    # ASSUMPTION: The parsing function returns a DataFrame containing a key like 'Comanda ID'.
+                    if 'Comanda ID' in df.columns:
+                         df.rename(columns={'Comanda ID': 'comanda_id'}, inplace=True)
+                    all_breakdowns_df.append(df)
+                except Exception as e:
+                    st.warning(f"Nu am putut procesa fișierul {file.name}: {e}")
+
+            if all_breakdowns_df:
+                master_breakdown_df = pd.concat(all_breakdowns_df, ignore_index=True)
+
+                # ASSUMPTION: The key for merging is 'comanda_id'. This is CRITICAL.
+                key_column = 'comanda_id'
+
+                if key_column not in st.session_state.pl_df.columns:
+                    st.error(f"Coloana cheie '{key_column}' nu a fost găsită în P&L. Verifică funcția de parsare.")
+                elif key_column not in master_breakdown_df.columns:
+                    st.error(f"Coloana cheie '{key_column}' nu a fost găsită în Desfășurătoare. Verifică funcția de parsare.")
+                else:
+                    st.info(f"Am procesat {len(master_breakdown_df)} înregistrări din {len(breakdown_files)} fișiere desfășurător.")
+
+                    # Perform the reconciliation
+                    reconciled_df = pd.merge(
+                        st.session_state.pl_df,
+                        master_breakdown_df[[key_column]].drop_duplicates(),
+                        on=key_column,
+                        how='left',
+                        indicator=True
+                    )
+
+                    # Create a user-friendly status column
+                    reconciled_df['Status Reconciliere'] = reconciled_df['_merge'].apply(lambda x: 'Confirmat' if x == 'both' else 'Neconfirmat')
+
+                    # Display summary
+                    confirmed_count = len(reconciled_df[reconciled_df['Status Reconciliere'] == 'Confirmat'])
+                    total_count = len(reconciled_df)
+                    st.subheader("Rezultate Reconciliere")
+                    st.metric("Grad de Confirmare", f"{confirmed_count} / {total_count} înregistrări P&L")
+
+                    # Display detailed results
+                    st.dataframe(reconciled_df, width='stretch')
+
+                    st.session_state.reconciled_df = reconciled_df # Save for download
+
+# --- Pasul 4: Download Rezultate (Opțional) ---
+if 'reconciled_df' in st.session_state and st.session_state.reconciled_df is not None:
+    @st.cache_data
+    def convert_df_to_csv(df):
+        return df.to_csv(index=False).encode('utf-8')
+
+    csv = convert_df_to_csv(st.session_state.reconciled_df)
+    st.download_button(
+        label="📥 Descarcă Rezultatele (.csv)",
+        data=csv,
+        file_name='reconciliere_p&l_vs_breakdowns.csv',
+        mime='text/csv',
+    )
+

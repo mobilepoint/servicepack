@@ -79,10 +79,10 @@ conn = init_connection()
 def detect_date_column(df):
     """
     Detectează automat coloana cu date.
-    
+
     Args:
         df: DataFrame
-        
+
     Returns:
         Numele coloanei cu date, sau None dacă nu găsește
     """
@@ -91,38 +91,57 @@ def detect_date_column(df):
         col_lower = col.lower()
         if any(keyword in col_lower for keyword in ['date', 'data', 'time', 'timp', 'data_']):
             return col
-    
+
     # Dacă nu găsește, încearcă datetime columns
     date_cols = df.select_dtypes(include=['datetime64']).columns.tolist()
     if date_cols:
         return date_cols[0]
-    
+
+    # Fallback: încearcă prima coloană
+    if len(df.columns) > 0:
+        return df.columns[0]
+
     return None
 
 def filter_year_2025_and_above(df, date_column):
     """
     Filtrează DataFrame-ul pentru a păstra doar înregistrările din 2025 sau după.
-    
+    CORECTIE: Suportă format european dd/mm/yyyy (zz/ll/aaaa)
+
     Args:
         df: DataFrame de filtrat
         date_column: Numele coloanei cu date
-        
+
     Returns:
         tuple: (DataFrame filtrat, nr rânduri eliminate, nr rânduri păstrate)
     """
     initial_count = len(df)
-    
+
     try:
-        # Convertește la datetime dacă nu e deja
+        # Convertește la datetime cu format EUROPEAN (zz/ll/aaaa)
         df_work = df.copy()
-        df_work[date_column] = pd.to_datetime(df_work[date_column], errors='coerce')
-        
-        # Filtrează: păstrează doar >= 2025-01-01
-        df_filtered = df_work[df_work[date_column].dt.year >= 2025].copy()
-        
+
+        # ✅ CORECTIE: dayfirst=True pentru format dd/mm/yyyy
+        df_work[date_column] = pd.to_datetime(
+            df_work[date_column], 
+            dayfirst=True,  # Format european: zi/lună/an
+            errors='coerce'
+        )
+
+        # Verifică câte date au eșuat la conversie
+        nat_count = df_work[date_column].isna().sum()
+        if nat_count > 0:
+            st.warning(f"⚠️ {nat_count} rânduri au date invalide și vor fi ignorate")
+
+        # Filtrează: păstrează doar >= 2025-01-01 ȘI date valide
+        df_filtered = df_work[
+            (df_work[date_column].dt.year >= 2025) & 
+            (df_work[date_column].notna())
+        ].copy()
+
         removed_count = initial_count - len(df_filtered)
         kept_count = len(df_filtered)
-        
+
         return df_filtered, removed_count, kept_count
     except Exception as e:
         st.error(f"❌ Eroare la filtrare: {e}")
@@ -158,7 +177,7 @@ def extract_total_amount(text: str) -> float:
         r'Total[:\s]+([0-9.,]+)\s*RON',
         r'Suma\s+totala[:\s]+([0-9.,]+)\s*RON',
     ]
-    
+
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
@@ -168,7 +187,7 @@ def extract_total_amount(text: str) -> float:
                 return float(amount_str)
             except ValueError:
                 continue
-    
+
     return None
 
 def extract_invoices(text: str) -> list:
@@ -176,19 +195,19 @@ def extract_invoices(text: str) -> list:
     pattern = r'([A-Z]{1,4})-MKTP-(\d+)'
     invoices = []
     seen = set()
-    
+
     lines = text.split('\n')
     for idx, line in enumerate(lines):
         matches = re.finditer(pattern, line)
         for match in matches:
             invoice_number = match.group(0)
             invoice_type = match.group(1)
-            
+
             if invoice_number in seen:
                 continue
-            
+
             seen.add(invoice_number)
-            
+
             # Încearcă să extragă suma
             amount = None
             amount_match = re.search(r'([0-9.,]+)\s*RON', line)
@@ -198,7 +217,7 @@ def extract_invoices(text: str) -> list:
                     amount = float(amount_str)
                 except ValueError:
                     pass
-            
+
             invoices.append({
                 'invoice_number': invoice_number,
                 'invoice_type': invoice_type,
@@ -206,7 +225,7 @@ def extract_invoices(text: str) -> list:
                 'position_in_pdf': idx + 1,
                 'raw_line': line.strip()
             })
-    
+
     return invoices
 
 def extract_payout_info(text: str, filename: str) -> dict:
@@ -217,31 +236,31 @@ def extract_payout_info(text: str, filename: str) -> dict:
         'reference_period_start': None,
         'reference_period_end': None
     }
-    
+
     # ✅ PATTERN 1: Payout ID din TITLU PDF
     payout_id_title = re.search(r'(\d{4}-\d{10})\s+(?:din|from)', text, re.IGNORECASE)
     if payout_id_title:
         info['payout_id'] = payout_id_title.group(1)
-    
+
     # PATTERN 2: Payout ID din nume fișier (fallback)
     if not info['payout_id']:
         filename_match = re.search(r'_(\d{10,})\.pdf', filename)
         if filename_match:
             info['payout_id'] = filename_match.group(1)
-    
+
     # PATTERN 3: Payout ID din text clasic (fallback)
     if not info['payout_id']:
         payout_id_match = re.search(r'Payout\s+ID[:\s]+(\d+)', text, re.IGNORECASE)
         if payout_id_match:
             info['payout_id'] = payout_id_match.group(1)
-    
+
     # ✅ Extragere DATA
     date_patterns = [
         r'(?:from|din)\s+(\d{2}\.\d{2}\.\d{4})',
         r'Data\s+platii?[:\s]+(\d{2}[-/.]\d{2}[-/.]\d{4})',
         r'Payout\s+date[:\s]+(\d{2}[-/.]\d{2}[-/.]\d{4})',
     ]
-    
+
     for pattern in date_patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
@@ -254,7 +273,7 @@ def extract_payout_info(text: str, filename: str) -> dict:
                     continue
             if info['payout_date']:
                 break
-    
+
     return info
 
 def parse_payout_pdf(pdf_bytes: bytes, filename: str) -> dict:
@@ -264,14 +283,14 @@ def parse_payout_pdf(pdf_bytes: bytes, filename: str) -> dict:
     payout_info = extract_payout_info(text, filename)
     total_amount = extract_total_amount(text)
     invoices = extract_invoices(text)
-    
+
     pages_count = 0
     try:
         with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
             pages_count = len(pdf.pages)
     except:
         pass
-    
+
     return {
         'pdf_hash': pdf_hash,
         'filename': filename,
@@ -311,51 +330,58 @@ tab1, tab2, tab3 = st.tabs([
 with tab1:
     st.header("📊 Upload Profit & Loss")
     st.markdown("Uploadează fișierul Excel cu datele P&L de la eMAG")
-    
-    st.info("📌 **Notă**: Toate datele anterioare anului 2025 vor fi ignorate automat")
-    
+
+    st.info("📌 **Notă**: Toate datele anterioare anului 2025 vor fi ignorate automat (format acceptat: zz/ll/aaaa)")
+
     uploaded_file = st.file_uploader(
         "Selectează fișier Excel",
         type=['xlsx', 'xls'],
         key="pl_uploader"
     )
-    
+
     if uploaded_file:
         try:
             # Citire fișier inițial
             df = pd.read_excel(uploaded_file)
-            
+
+            st.success(f"✅ Fișier încărcat: {uploaded_file.name}")
+            st.info(f"📋 Total rânduri inițiale: **{len(df)}**")
+
             # ✅ PASUL 1: DETECTARE COLOANĂ DATE ȘI FILTRARE 2025+
             date_column = detect_date_column(df)
-            
+
             if date_column:
+                st.info(f"🔍 Coloană date detectată: **{date_column}**")
+
+                # Preview primele 3 date pentru verificare
+                with st.expander("🔎 Vezi primele 3 date din fișier"):
+                    st.write(df[date_column].head(3).tolist())
+
                 df_filtered, removed, kept = filter_year_2025_and_above(df, date_column)
-                
+
                 if removed > 0:
                     st.warning(
-                        f"🗑️ **{removed} rânduri eliminate** (anterioare anului 2025)  |  "
+                        f"🗑️ **{removed} rânduri eliminate** (anterioare anului 2025 sau date invalide)  |  "
                         f"✅ **{kept} rânduri păstrate** (2025+)"
                     )
                 else:
                     st.success(f"✅ Toate {kept} rândurile sunt din 2025 sau mai recent")
-                
+
                 df = df_filtered
             else:
                 st.warning(
-                    "⚠️ Nu am găsit o coloană cu date. "
+                    "⚠️ Nu am găsit o coloană cu date automat. "
                     "Te rog specifică manual care este coloana cu date."
                 )
                 col_names = df.columns.tolist()
                 selected_col = st.selectbox("Selectează coloana cu date:", col_names)
-                
+
                 if selected_col:
                     df_filtered, removed, kept = filter_year_2025_and_above(df, selected_col)
                     if removed > 0:
                         st.warning(f"🗑️ {removed} rânduri eliminate | ✅ {kept} rânduri păstrate")
                     df = df_filtered
-            
-            st.success(f"✅ Fișier încărcat: {uploaded_file.name}")
-            
+
             col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric("📋 Rânduri (după filtrare)", len(df))
@@ -363,24 +389,26 @@ with tab1:
                 st.metric("📊 Coloane", len(df.columns))
             with col3:
                 st.metric("💾 Dimensiune", f"{uploaded_file.size / 1024:.1f} KB")
-            
+
             st.divider()
-            
+
             # Preview date
             st.subheader("👀 Preview Date (primele 10 rânduri)")
             st.dataframe(df.head(10), use_container_width=True)
-            
+
             st.divider()
-            
-            # Statistici coloane
-            st.subheader("📊 Statistici coloane")
-            st.dataframe(df.describe(), use_container_width=True)
-            
+
+            # Statistici coloane numerice
+            numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
+            if numeric_cols:
+                st.subheader("📊 Statistici coloane numerice")
+                st.dataframe(df[numeric_cols].describe(), use_container_width=True)
+
             st.divider()
-            
+
             # Acțiuni
             col1, col2 = st.columns(2)
-            
+
             with col1:
                 if st.button("💾 Salvează în DB", type="primary", key="save_pl"):
                     if conn:
@@ -388,29 +416,29 @@ with tab1:
                             st.info("🚧 Funcționalitate în dezvoltare")
                     else:
                         st.error("❌ DB nu este conectat")
-            
+
             with col2:
                 if st.button("📊 Generează raport", key="report_pl"):
                     st.info("🚧 Funcționalitate în dezvoltare")
-            
+
             # Export
             st.divider()
             st.subheader("💾 Exportare date filtrate")
-            
+
             csv_buffer = df.to_csv(index=False).encode('utf-8')
             st.download_button(
-                label="📥 Descarcă CSV (filtrat)",
+                label="📥 Descarcă CSV (filtrat 2025+)",
                 data=csv_buffer,
                 file_name=f"PL_filtrat_2025_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.csv",
                 mime="text/csv"
             )
-        
+
         except Exception as e:
             st.error(f"❌ Eroare la citire: {str(e)}")
             with st.expander("📋 Detalii eroare"):
                 import traceback
                 st.code(traceback.format_exc())
-    
+
     else:
         st.info("👆 Uploadează un fișier Excel pentru a începe")
 
@@ -422,27 +450,27 @@ with tab2:
     st.header("📄 Payout PDF Parser")
     st.markdown("""
     Uploadează PDF-ul de payout de la eMAG pentru a extrage:
-    
+
     - 💰 **Suma totală** de plată
     - 📋 **Lista facturilor** (C-MKTP, V-MKTP, etc.)
     - 📅 **Date și perioade** de referință
     """)
-    
+
     st.divider()
-    
+
     uploaded_pdf = st.file_uploader(
         "Selectează PDF payout",
         type=['pdf'],
         key="pdf_uploader",
         help="Uploadează avizul de plată (payout notice) de la eMAG"
     )
-    
+
     if uploaded_pdf:
         pdf_bytes = uploaded_pdf.read()
-        
+
         # Info fișier
         col1, col2, col3 = st.columns(3)
-        
+
         with col1:
             st.metric("📁 Fișier", uploaded_pdf.name)
         with col2:
@@ -450,49 +478,49 @@ with tab2:
         with col3:
             file_hash = calculate_pdf_hash(pdf_bytes)
             st.metric("🔑 Hash", file_hash[:12] + "...")
-        
+
         st.divider()
-        
+
         # Parsare
         with st.spinner("🔍 Parsez PDF-ul..."):
             try:
                 result = parse_payout_pdf(pdf_bytes, uploaded_pdf.name)
                 st.success("✅ PDF parsat cu succes!")
-                
+
                 # Rezultate
                 st.subheader("📊 Informații Payout")
-                
+
                 col1, col2, col3, col4 = st.columns(4)
-                
+
                 with col1:
                     payout_id = result['payout_info'].get('payout_id')
                     if payout_id:
                         st.metric("🆔 Payout ID", payout_id)
                     else:
                         st.warning("❌ Payout ID nu a fost găsit")
-                
+
                 with col2:
                     payout_date = result['payout_info'].get('payout_date')
                     if payout_date:
                         st.metric("📅 Data plății", payout_date.strftime("%d.%m.%Y"))
                     else:
                         st.warning("❌ Data nu a fost găsită")
-                
+
                 with col3:
                     total = result.get('total_amount')
                     if total:
                         st.metric("💰 Total", f"{total:,.2f} RON")
                     else:
                         st.warning("❌ Total nu a fost găsit")
-                
+
                 with col4:
                     st.metric("📄 Facturi", result['invoices_count'])
-                
+
                 st.divider()
-                
+
                 # Lista facturi
                 st.subheader(f"📋 Facturi Găsite ({result['invoices_count']})")
-                
+
                 if result['invoices']:
                     # Grupare pe tip
                     invoice_types = {}
@@ -501,7 +529,7 @@ with tab2:
                         if inv_type not in invoice_types:
                             invoice_types[inv_type] = []
                         invoice_types[inv_type].append(inv)
-                    
+
                     # Labels
                     type_labels = {
                         'C': '💼 Comisioane',
@@ -510,12 +538,12 @@ with tab2:
                         'A': '📢 Ads',
                         'D': '📦 Diverse'
                     }
-                    
+
                     tabs = st.tabs([
                         f"{type_labels.get(t, t)} ({len(invoices)})"
                         for t, invoices in invoice_types.items()
                     ])
-                    
+
                     for idx, (inv_type, invoices) in enumerate(invoice_types.items()):
                         with tabs[idx]:
                             df_inv = pd.DataFrame([{
@@ -524,14 +552,14 @@ with tab2:
                                 'Poziție': inv['position_in_pdf'],
                                 'Linia din PDF': inv['raw_line'][:80] + '...' if len(inv['raw_line']) > 80 else inv['raw_line']
                             } for inv in invoices])
-                            
+
                             st.dataframe(df_inv, use_container_width=True, hide_index=True)
-                
+
                 else:
                     st.warning("⚠️ Nu am găsit facturi în PDF.")
-                
+
                 st.divider()
-                
+
                 # Debug info
                 with st.expander("🔧 Debug Info"):
                     st.json({
@@ -544,34 +572,34 @@ with tab2:
                         'total_amount': result['total_amount'],
                         'invoices_count': result['invoices_count']
                     })
-                
+
                 # Acțiuni
                 st.divider()
                 st.subheader("⚡ Acțiuni")
-                
+
                 col1, col2, col3 = st.columns(3)
-                
+
                 with col1:
                     if st.button("💾 Salvează în DB", type="primary", disabled=not conn, key="save_pdf"):
                         if conn:
                             st.info("🚧 Funcționalitate în dezvoltare")
                         else:
                             st.error("❌ DB nu este conectat")
-                
+
                 with col2:
                     if st.button("🔍 Reconciliază cu Excel", disabled=True, key="reconcile_pdf"):
                         st.info("🚧 Funcționalitate în dezvoltare")
-                
+
                 with col3:
                     if st.button("📊 Raport complet", disabled=True, key="report_pdf"):
                         st.info("🚧 Funcționalitate în dezvoltare")
-            
+
             except Exception as e:
                 st.error(f"❌ Eroare la parsare: {str(e)}")
                 with st.expander("📋 Detalii eroare"):
                     import traceback
                     st.code(traceback.format_exc())
-    
+
     else:
         st.info("👆 Uploadează un PDF pentru a începe parsarea")
 
@@ -588,4 +616,4 @@ with tab3:
 # ═══════════════════════════════════════════════════════
 
 st.divider()
-st.caption("🏪 eMAG Business Intelligence v2.1 | Mobile Point")
+st.caption("🏪 eMAG Business Intelligence v2.1 (fix dd/mm/yyyy) | Mobile Point")

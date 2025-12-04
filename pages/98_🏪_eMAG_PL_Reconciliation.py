@@ -490,12 +490,12 @@ with tab1:
 
             st.divider()
             st.subheader("👀 Preview Date (primele 10 rânduri)")
-            st.dataframe(df.head(10), use_container_width=True)
+            st.dataframe(df.head(10), width='stretch')
             st.divider()
             numeric_cols = df.select_dtypes(include=['number']).columns.tolist()
             if numeric_cols:
                 st.subheader("📊 Statistici coloane numerice")
-                st.dataframe(df[numeric_cols].describe(), use_container_width=True)
+                st.dataframe(df[numeric_cols].describe(), width='stretch')
 
             st.divider()
             st.subheader("📊 Statistici bază de date")
@@ -652,7 +652,7 @@ with tab2:
                                 'Poziție': inv['position_in_pdf'],
                                 'Linia din PDF': inv['raw_line'][:80] + '...' if len(inv['raw_line']) > 80 else inv['raw_line']
                             } for inv in invoices])
-                            st.dataframe(df_inv, use_container_width=True, hide_index=True)
+                            st.dataframe(df_inv, width='stretch', hide_index=True)
                 else:
                     st.warning("⚠️ Nu am găsit facturi în PDF.")
 
@@ -1012,7 +1012,7 @@ with tab3:
             invoices_df['Label'] = invoices_df['invoice_label'].fillna('').str.slice(0, 60)
             st.dataframe(
                 invoices_df[['invoice_number', 'Tip', 'Sumă', 'Label']],
-                use_container_width=True,
+                width='stretch',
                 hide_index=True
             )
             
@@ -1055,7 +1055,7 @@ with tab3:
                     })
 
                 
-                st.dataframe(pd.DataFrame(breakdown_info), use_container_width=True, hide_index=True)
+                st.dataframe(pd.DataFrame(breakdown_info), width='stretch', hide_index=True)
                 
                 st.divider()
                 
@@ -1180,7 +1180,7 @@ with tab3:
                                 lambda x: '✅ OK' if abs(x) < 0.01 else '⚠️ Diferență'
                             )
                             
-                            st.dataframe(reconcile_df, use_container_width=True, hide_index=True)
+                            st.dataframe(reconcile_df, width='stretch', hide_index=True)
                             
                             # Profit query
                             st.subheader("💰 Raport Profit")
@@ -1217,7 +1217,7 @@ with tab3:
                                     margin = (total_profit / total_vanzari * 100) if total_vanzari > 0 else 0
                                     st.metric("📊 Marjă Profit", f"{margin:.1f}%")
                                 
-                                st.dataframe(profit_df.head(50), use_container_width=True, hide_index=True)
+                                st.dataframe(profit_df.head(50), width='stretch', hide_index=True)
                         else:
                             st.info("Nu există date de reconciliere pentru acest payout.")
         else:

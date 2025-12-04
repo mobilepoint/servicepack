@@ -8,3 +8,4 @@ openpyxl
 requests
 xlrd
 PyPDF2
+pdfplumber>=0.11.0

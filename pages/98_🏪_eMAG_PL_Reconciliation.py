@@ -162,7 +162,7 @@ def upload_pl_to_db(df, conn):
                 upload_batch_id
             ) VALUES (
                 :order_id, :product_id, :tip_desfasurator, :data, :seller, :ean, :cod_produs_pn, :pnk, :brand, :produs,
-                :cantitate, :vanzari, :taxa_livrare, :taxa_retur, :valoare_retinuta, :comision, :comision_anulate,
+            :cantitate, :vanzari, :taxa_livrare, :taxa_retur, :valoare_retinuta, :comision, :comision_anulate,
                 :comision_taxa_livrare, :depozitare_fbe, :operatiuni_fbe, :cost_livrare, :cost_retur, :vanzari_nete,
                 :upload_batch_id
             )
@@ -747,9 +747,9 @@ def detect_breakdown_type_from_payout(invoice_number: str,
     if "card" in label or "online card" in label or "incasari card" in label:
         return "DP_CARD"     # încasări card – legăm de fișierele DP CO
     if 'co ' in filename_lower or 'online_card' in filename_lower:
-    return 'DP_CARD'
+        return 'DP_CARD'
     if 'cod ' in filename_lower or 'cash_on_delivery' in filename_lower:
-    return 'DP_COD'
+        return 'DP_COD'
 
     # 3. Fallback
     return "UNKNOWN"

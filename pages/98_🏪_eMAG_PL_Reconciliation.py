@@ -1,278 +1,417 @@
+"""
+eMAG P&L Reconciliation + Payout PDF Parser + Breakdown Parser
+Toate funcționalitățile eMAG într-un singur loc
+"""
+
 import streamlit as st
 import pandas as pd
-import psycopg2
-from psycopg2.extras import RealDictCursor
+import pdfplumber
+import re
+import hashlib
 from datetime import datetime
+from io import BytesIO
+import os
 
+# Setări pagină
 st.set_page_config(
-    page_title="eMAG P&L Reconciliation",
+    page_title="eMAG Business Intelligence",
     page_icon="🏪",
     layout="wide"
 )
 
-# ═══════════════════════════════════════════════════════
-# FUNCȚIE CONEXIUNE DB
-# ═══════════════════════════════════════════════════════
+# Inițializare Supabase
+try:
+    from supabase import create_client
+    supabase = create_client(
+        st.secrets["SUPABASE_URL"],
+        st.secrets["SUPABASE_KEY"]
+    )
+except Exception as e:
+    st.error(f"⚠️ Eroare conexiune Supabase: {e}")
+    supabase = None
 
-def get_db_connection():
-    """Conectare la PostgreSQL/Supabase"""
-    try:
-        pg_url = st.secrets["connections"]["postgresql"]["url"]
-        conn = psycopg2.connect(pg_url, connect_timeout=10)
-        return conn
-    except Exception as e:
-        st.error(f"❌ Nu mă pot conecta la baza de date: {e}")
-        return None
 
 # ═══════════════════════════════════════════════════════
-# HEADER
+# HELPER FUNCTIONS - PDF PARSING
 # ═══════════════════════════════════════════════════════
 
-st.title("🏪 eMAG P&L Reconciliation")
-st.caption("Reconcilierea rapoartelor Profit & Loss cu facturile și avizele de plată")
+def calculate_pdf_hash(pdf_bytes: bytes) -> str:
+    """Calculează SHA256 hash pentru PDF."""
+    return hashlib.sha256(pdf_bytes).hexdigest()
+
+
+def extract_text_from_pdf(pdf_bytes: bytes) -> str:
+    """Extrage tot textul din PDF."""
+    full_text = ""
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text()
+            if text:
+                full_text += text + "\n"
+    return full_text
+
+
+def extract_total_amount(text: str) -> float:
+    """Extrage suma totală de plată din PDF."""
+    patterns = [
+        r'Total\s+de\s+plata[:\s]+([0-9.,]+)\s*RON',
+        r'Total\s+amount[:\s]+([0-9.,]+)\s*RON',
+        r'TOTAL[:\s]+([0-9.,]+)\s*RON',
+        r'Total[:\s]+([0-9.,]+)\s*RON',
+        r'Suma\s+totala[:\s]+([0-9.,]+)\s*RON',
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            amount_str = match.group(1)
+            amount_str = amount_str.replace('.', '').replace(',', '.')
+            try:
+                return float(amount_str)
+            except ValueError:
+                continue
+    return None
+
+
+def extract_invoices(text: str) -> list:
+    """Extrage toate numerele de facturi din PDF."""
+    pattern = r'([A-Z]{1,4})-MKTP-(\d+)'
+    invoices = []
+    seen = set()
+    lines = text.split('\n')
+    
+    for idx, line in enumerate(lines):
+        matches = re.finditer(pattern, line)
+        for match in matches:
+            invoice_number = match.group(0)
+            invoice_type = match.group(1)
+            
+            if invoice_number in seen:
+                continue
+            seen.add(invoice_number)
+            
+            # Încearcă să extragă suma
+            amount = None
+            amount_match = re.search(r'([0-9.,]+)\s*RON', line)
+            if amount_match:
+                amount_str = amount_match.group(1).replace('.', '').replace(',', '.')
+                try:
+                    amount = float(amount_str)
+                except ValueError:
+                    pass
+            
+            invoices.append({
+                'invoice_number': invoice_number,
+                'invoice_type': invoice_type,
+                'invoice_amount': amount,
+                'position_in_pdf': idx + 1,
+                'raw_line': line.strip()
+            })
+    
+    return invoices
+
+
+def extract_payout_info(text: str, filename: str) -> dict:
+    """Extrage informații despre payout (ID, date)."""
+    info = {
+        'payout_id': None,
+        'payout_date': None,
+        'reference_period_start': None,
+        'reference_period_end': None
+    }
+    
+    # Payout ID din nume sau text
+    filename_match = re.search(r'_(\d{8,})\.pdf', filename)
+    if filename_match:
+        info['payout_id'] = int(filename_match.group(1))
+    
+    payout_id_match = re.search(r'Payout\s+ID[:\s]+(\d+)', text, re.IGNORECASE)
+    if payout_id_match:
+        info['payout_id'] = int(payout_id_match.group(1))
+    
+    # Date
+    date_patterns = [
+        r'Data\s+platii?[:\s]+(\d{2}[-/.]\d{2}[-/.]\d{4})',
+        r'Payout\s+date[:\s]+(\d{2}[-/.]\d{2}[-/.]\d{4})',
+    ]
+    
+    for pattern in date_patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            date_str = match.group(1)
+            for date_format in ['%d-%m-%Y', '%d.%m.%Y', '%d/%m/%Y']:
+                try:
+                    info['payout_date'] = datetime.strptime(date_str, date_format).date()
+                    break
+                except ValueError:
+                    continue
+            if info['payout_date']:
+                break
+    
+    return info
+
+
+def parse_payout_pdf(pdf_bytes: bytes, filename: str) -> dict:
+    """Parser principal pentru PDF payout."""
+    pdf_hash = calculate_pdf_hash(pdf_bytes)
+    text = extract_text_from_pdf(pdf_bytes)
+    
+    payout_info = extract_payout_info(text, filename)
+    total_amount = extract_total_amount(text)
+    invoices = extract_invoices(text)
+    
+    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+        pages_count = len(pdf.pages)
+    
+    return {
+        'pdf_hash': pdf_hash,
+        'filename': filename,
+        'pages_count': pages_count,
+        'payout_info': payout_info,
+        'total_amount': total_amount,
+        'invoices': invoices,
+        'invoices_count': len(invoices)
+    }
+
 
 # ═══════════════════════════════════════════════════════
-# TABS
+# MAIN APP
 # ═══════════════════════════════════════════════════════
 
+st.title("🏪 eMAG Business Intelligence")
+st.markdown("**Central hub pentru toate operațiunile eMAG**")
+
+# Tab-uri principale
 tab1, tab2, tab3 = st.tabs([
-    "📤 Upload P&L", 
-    "📊 Dashboard", 
-    "💰 Reconciliere Avize"
+    "📊 Upload P&L",
+    "📄 Payout PDF Parser",
+    "📑 Breakdown Excel Parser"
 ])
 
+
 # ═══════════════════════════════════════════════════════
-# TAB 1: UPLOAD P&L
+# TAB 1: UPLOAD P&L (existent)
 # ═══════════════════════════════════════════════════════
 
 with tab1:
-    st.header("📤 Upload raport P&L eMAG")
-    
-    st.info("""
-    **Pași:**
-    1. Descarcă raportul P&L (Profit & Loss) din eMAG Marketplace
-    2. Upload fișierul Excel aici
-    3. Datele vor fi procesate și salvate în baza de date
-    """)
+    st.header("📊 Upload Profit & Loss")
+    st.markdown("Uploadează fișierul Excel cu datele P&L de la eMAG")
     
     uploaded_file = st.file_uploader(
-        "Selectează raportul P&L (Excel)",
+        "Selectează fișier Excel",
         type=['xlsx', 'xls'],
-        help="Raportul descărcat din eMAG Marketplace > Reports > Profit & Loss"
+        key="pl_uploader"
     )
     
     if uploaded_file:
-        st.success(f"✅ Fișier încărcat: **{uploaded_file.name}**")
-        
         try:
-            # Citește Excel
             df = pd.read_excel(uploaded_file)
             
-            st.write(f"**Rânduri găsite:** {len(df)}")
+            st.success(f"✅ Fișier încărcat: {uploaded_file.name}")
             
-            # Afișează preview
-            with st.expander("👁️ Preview date (primele 10 rânduri)"):
-                st.dataframe(df.head(10))
-            
-            # Afișează coloanele
-            with st.expander("📋 Coloane disponibile"):
-                st.write(list(df.columns))
-            
-            # Buton procesare (doar placeholder pentru moment)
-            if st.button("🚀 Procesează și salvează în DB", type="primary"):
-                st.warning("⚠️ Funcția de import automată va fi adăugată în următoarea versiune.")
-                st.info("Pentru moment, verifică că datele sunt corecte în preview.")
-                
-        except Exception as e:
-            st.error(f"❌ Eroare la citirea fișierului: {e}")
-
-# ═══════════════════════════════════════════════════════
-# TAB 2: DASHBOARD
-# ═══════════════════════════════════════════════════════
-
-with tab2:
-    st.header("📊 Dashboard eMAG - Vânzări și Profit")
-    
-    conn = get_db_connection()
-    if not conn:
-        st.stop()
-    
-    try:
-        cursor = conn.cursor(cursor_factory=RealDictCursor)
-        
-        # Statistici generale
-        cursor.execute("""
-            SELECT
-                COUNT(*) AS total_linii,
-                COUNT(DISTINCT id_comanda) AS comenzi_unice,
-                ROUND(SUM(vanzari), 2)        AS total_vanzari,
-                ROUND(SUM(comision), 2)       AS total_comision,
-                ROUND(SUM(vanzari_nete), 2)   AS total_vanzari_nete,
-                ROUND(SUM(COALESCE(profit_net, 0)), 2) AS total_profit
-            FROM emag_order_lines
-        """)
-        stats = cursor.fetchone()
-        
-        # Metrici principale
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric(
-                "💰 Total vânzări", 
-                f"{stats['total_vanzari'] or 0:,.2f} RON"
-            )
-        
-        with col2:
-            st.metric(
-                "💸 Comisioane eMAG", 
-                f"{stats['total_comision'] or 0:,.2f} RON",
-                delta=f"-{(stats['total_comision'] or 0) / (stats['total_vanzari'] or 1) * 100:.1f}%",
-                delta_color="inverse"
-            )
-        
-        with col3:
-            st.metric(
-                "📦 Vânzări nete", 
-                f"{stats['total_vanzari_nete'] or 0:,.2f} RON"
-            )
-        
-        with col4:
-            profit = stats['total_profit'] or 0
-            marja = (profit / (stats['total_vanzari'] or 1) * 100) if stats['total_vanzari'] else 0
-            st.metric(
-                "✨ Profit net", 
-                f"{profit:,.2f} RON",
-                delta=f"{marja:.1f}% marjă"
-            )
-        
-        st.divider()
-        
-        # Info suplimentară
-        col1, col2 = st.columns(2)
-        with col1:
-            st.metric("📦 Total comenzi", f"{stats['comenzi_unice'] or 0:,}")
-        with col2:
-            st.metric("📋 Total linii", f"{stats['total_linii'] or 0:,}")
-        
-        st.divider()
-        
-        # Tabel comenzi
-        st.subheader("📋 Comenzi recente")
-        
-        cursor.execute("""
-            SELECT
-                data,
-                id_comanda,
-                sku,
-                LEFT(produs, 50) AS produs,
-                cantitate,
-                ROUND(vanzari, 2)      AS vanzari,
-                ROUND(comision, 2)     AS comision,
-                ROUND(vanzari_nete, 2) AS vanzari_nete,
-                ROUND(COALESCE(profit_net, 0), 2) AS profit_net
-            FROM emag_order_lines
-            ORDER BY data DESC
-            LIMIT 200
-        """)
-        
-        rows = cursor.fetchall()
-        
-        if rows:
-            df = pd.DataFrame(rows)
-            df['data'] = pd.to_datetime(df['data']).dt.strftime('%d/%m/%Y')
-            
-            st.dataframe(
-                df,
-                use_container_width=True,
-                height=600,
-                column_config={
-                    "data": st.column_config.TextColumn("Data", width="small"),
-                    "id_comanda": st.column_config.NumberColumn("ID Comandă", format="%d"),
-                    "sku": st.column_config.TextColumn("SKU", width="medium"),
-                    "produs": st.column_config.TextColumn("Produs", width="large"),
-                    "cantitate": st.column_config.NumberColumn("Cant.", format="%d"),
-                    "vanzari": st.column_config.NumberColumn("Vânzări", format="%.2f RON"),
-                    "comision": st.column_config.NumberColumn("Comision", format="%.2f RON"),
-                    "vanzari_nete": st.column_config.NumberColumn("Vânzări Nete", format="%.2f RON"),
-                    "profit_net": st.column_config.NumberColumn("Profit Net", format="%.2f RON"),
-                }
-            )
-            
-            st.caption(f"📊 Afișate ultimele 200 comenzi din {stats['total_linii']} total")
-        else:
-            st.info("📭 Nu există date în tabelul `emag_order_lines`.")
-            st.caption("Upload un raport P&L în Tab 1 pentru a vedea datele aici.")
-        
-        cursor.close()
-        conn.close()
-        
-    except Exception as e:
-        st.error(f"❌ Eroare la încărcarea dashboard-ului: {e}")
-        st.exception(e)
-        if conn:
-            conn.close()
-
-# ═══════════════════════════════════════════════════════
-# TAB 3: RECONCILIERE AVIZE
-# ═══════════════════════════════════════════════════════
-
-with tab3:
-    st.header("💰 Reconciliere Avize de Plată")
-    
-    st.info("""
-    **Status:** În dezvoltare
-    
-    Funcționalități planificate:
-    - ✅ Tabele create în DB (`emag_payout_notices`, `emag_invoices`)
-    - 🔄 Sincronizare factури prin eMAG API (în implementare)
-    - 🔄 Upload și validare avize PDF
-    - 🔄 Reconciliere automată
-    
-    **Următorii pași:**
-    1. Testare eMAG Invoice API pentru a vedea ce rapoarte sunt disponibile
-    2. Sincronizare periodică a facturilor
-    3. Implementare workflow reconciliere
-    """)
-    
-    # Verifică dacă tabelele există
-    conn = get_db_connection()
-    if conn:
-        try:
-            cursor = conn.cursor(cursor_factory=RealDictCursor)
-            
-            # Check emag_payout_notices
-            cursor.execute("""
-                SELECT COUNT(*) AS cnt 
-                FROM emag_payout_notices
-            """)
-            payout_count = cursor.fetchone()['cnt']
-            
-            # Check emag_invoices
-            cursor.execute("""
-                SELECT COUNT(*) AS cnt 
-                FROM emag_invoices
-            """)
-            invoice_count = cursor.fetchone()['cnt']
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("📋 Rânduri", len(df))
+            with col2:
+                st.metric("📊 Coloane", len(df.columns))
+            with col3:
+                st.metric("💾 Dimensiune", f"{uploaded_file.size / 1024:.1f} KB")
             
             st.divider()
             
+            # Preview date
+            st.subheader("👀 Preview Date")
+            st.dataframe(df.head(10), use_container_width=True)
+            
+            # Acțiuni
+            st.divider()
             col1, col2 = st.columns(2)
+            
             with col1:
-                st.metric("📄 Avize salvate", payout_count)
+                if st.button("💾 Salvează în Supabase", type="primary", key="save_pl"):
+                    if supabase:
+                        with st.spinner("Salvare în curs..."):
+                            # TODO: Implementare salvare în DB
+                            st.info("🚧 Funcționalitate în dezvoltare")
+                    else:
+                        st.error("❌ Supabase nu este conectat")
+            
             with col2:
-                st.metric("🧾 Facturi salvate", invoice_count)
-            
-            cursor.close()
-            conn.close()
-            
+                if st.button("📊 Generează raport", key="report_pl"):
+                    st.info("🚧 Funcționalitate în dezvoltare")
+                    
         except Exception as e:
-            st.warning(f"⚠️ Nu pot verifica tabelele: {e}")
-            if conn:
-                conn.close()
+            st.error(f"❌ Eroare la citire: {str(e)}")
+
+
+# ═══════════════════════════════════════════════════════
+# TAB 2: PAYOUT PDF PARSER
+# ═══════════════════════════════════════════════════════
+
+with tab2:
+    st.header("📄 Payout PDF Parser")
+    st.markdown("""
+    Uploadează PDF-ul de payout de la eMAG pentru a extrage:
+    - 💰 **Suma totală** de plată
+    - 📋 **Lista facturilor** (C-MKTP, V-MKTP, etc.)
+    - 📅 **Date și perioade** de referință
+    """)
+    
+    st.divider()
+    
+    uploaded_pdf = st.file_uploader(
+        "Selectează PDF payout",
+        type=['pdf'],
+        key="pdf_uploader",
+        help="Uploadează avizul de plată (payout notice) de la eMAG"
+    )
+    
+    if uploaded_pdf:
+        pdf_bytes = uploaded_pdf.read()
+        
+        # Info fișier
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("📁 Fișier", uploaded_pdf.name)
+        with col2:
+            st.metric("📊 Dimensiune", f"{len(pdf_bytes) / 1024:.1f} KB")
+        with col3:
+            file_hash = calculate_pdf_hash(pdf_bytes)
+            st.metric("🔑 Hash", file_hash[:12] + "...")
+        
+        st.divider()
+        
+        # Parsare
+        with st.spinner("🔍 Parsez PDF-ul..."):
+            try:
+                result = parse_payout_pdf(pdf_bytes, uploaded_pdf.name)
+                
+                st.success("✅ PDF parsat cu succes!")
+                
+                # Rezultate
+                st.subheader("📊 Informații Payout")
+                
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    payout_id = result['payout_info'].get('payout_id')
+                    if payout_id:
+                        st.metric("🆔 Payout ID", f"{payout_id:,}")
+                    else:
+                        st.warning("❌ Payout ID nu a fost găsit")
+                
+                with col2:
+                    payout_date = result['payout_info'].get('payout_date')
+                    if payout_date:
+                        st.metric("📅 Data plății", payout_date.strftime("%d.%m.%Y"))
+                    else:
+                        st.warning("❌ Data nu a fost găsită")
+                
+                with col3:
+                    total = result.get('total_amount')
+                    if total:
+                        st.metric("💰 Total", f"{total:,.2f} RON")
+                    else:
+                        st.warning("❌ Total nu a fost găsit")
+                
+                with col4:
+                    st.metric("📄 Facturi", result['invoices_count'])
+                
+                st.divider()
+                
+                # Lista facturi
+                st.subheader(f"📋 Facturi Găsite ({result['invoices_count']})")
+                
+                if result['invoices']:
+                    # Grupare pe tip
+                    invoice_types = {}
+                    for inv in result['invoices']:
+                        inv_type = inv['invoice_type']
+                        if inv_type not in invoice_types:
+                            invoice_types[inv_type] = []
+                        invoice_types[inv_type].append(inv)
+                    
+                    # Labels
+                    type_labels = {
+                        'C': '💼 Comisioane',
+                        'V': '🎟️ Vouchere',
+                        'Y': '🔄 Retururi',
+                        'A': '📢 Ads',
+                        'D': '📦 Diverse'
+                    }
+                    
+                    tabs = st.tabs([
+                        f"{type_labels.get(t, t)} ({len(invoices)})" 
+                        for t, invoices in invoice_types.items()
+                    ])
+                    
+                    for idx, (inv_type, invoices) in enumerate(invoice_types.items()):
+                        with tabs[idx]:
+                            df_inv = pd.DataFrame([{
+                                'Număr factură': inv['invoice_number'],
+                                'Sumă (RON)': f"{inv['invoice_amount']:,.2f}" if inv['invoice_amount'] else 'N/A',
+                                'Poziție': inv['position_in_pdf'],
+                                'Linia din PDF': inv['raw_line'][:80] + '...' if len(inv['raw_line']) > 80 else inv['raw_line']
+                            } for inv in invoices])
+                            
+                            st.dataframe(df_inv, use_container_width=True, hide_index=True)
+                else:
+                    st.warning("⚠️ Nu am găsit facturi în PDF.")
+                
+                st.divider()
+                
+                # Debug info
+                with st.expander("🔧 Debug Info"):
+                    st.json({
+                        'pdf_hash': result['pdf_hash'],
+                        'pages_count': result['pages_count'],
+                        'payout_info': {
+                            'payout_id': result['payout_info'].get('payout_id'),
+                            'payout_date': str(result['payout_info'].get('payout_date')),
+                        },
+                        'total_amount': result['total_amount'],
+                        'invoices_count': result['invoices_count']
+                    })
+                
+                # Acțiuni
+                st.divider()
+                st.subheader("⚡ Acțiuni")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    if st.button("💾 Salvează în DB", type="primary", disabled=True, key="save_pdf"):
+                        st.info("🚧 Funcționalitate în dezvoltare")
+                
+                with col2:
+                    if st.button("🔍 Reconciliază cu Excel", disabled=True, key="reconcile_pdf"):
+                        st.info("🚧 Funcționalitate în dezvoltare")
+                
+                with col3:
+                    if st.button("📊 Raport complet", disabled=True, key="report_pdf"):
+                        st.info("🚧 Funcționalitate în dezvoltare")
+                
+            except Exception as e:
+                st.error(f"❌ Eroare la parsare: {str(e)}")
+                with st.expander("📋 Detalii eroare"):
+                    import traceback
+                    st.code(traceback.format_exc())
+    else:
+        st.info("👆 Uploadează un PDF pentru a începe parsarea")
+
+
+# ═══════════════════════════════════════════════════════
+# TAB 3: BREAKDOWN EXCEL PARSER (placeholder)
+# ═══════════════════════════════════════════════════════
+
+with tab3:
+    st.header("📑 Breakdown Excel Parser")
+    st.info("🚧 Funcționalitate în dezvoltare - va permite upload desfășurătoare Excel (DC, DV, DP, etc.)")
+
 
 # ═══════════════════════════════════════════════════════
 # FOOTER
 # ═══════════════════════════════════════════════════════
 
 st.divider()
-st.caption(f"📅 Ultima actualizare: {datetime.now().strftime('%d/%m/%Y %H:%M')}")
+st.caption("🏪 eMAG Business Intelligence v2.0 | Mobile Point")

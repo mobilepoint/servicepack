@@ -34,7 +34,6 @@ def check_password():
             st.session_state["password_correct"] = False
 
     if "password_correct" not in st.session_state:
-        # Prima rulare, arată input pentru parolă
         st.text_input(
             "🔒 Parolă",
             type="password",
@@ -43,7 +42,6 @@ def check_password():
         )
         st.stop()
     elif not st.session_state["password_correct"]:
-        # Parolă incorectă, arată input + eroare
         st.text_input(
             "🔒 Parolă",
             type="password",
@@ -57,23 +55,19 @@ def check_password():
 check_password()
 
 # ═══════════════════════════════════════════════════════
-# INIȚIALIZARE SUPABASE
+# CONEXIUNE POSTGRESQL (ca în sidebar)
 # ═══════════════════════════════════════════════════════
 
 @st.cache_resource
-def init_supabase():
-    """Inițializează conexiunea Supabase."""
+def init_connection():
+    """Inițializează conexiunea PostgreSQL Direct."""
     try:
-        from supabase import create_client
-        return create_client(
-            st.secrets["SUPABASE_URL"],
-            st.secrets["SUPABASE_KEY"]
-        )
+        return st.connection("postgresql", type="sql")
     except Exception as e:
-        st.error(f"⚠️ Eroare conexiune Supabase: {e}")
+        st.error(f"⚠️ Eroare conexiune PostgreSQL: {e}")
         return None
 
-supabase = init_supabase()
+conn = init_connection()
 
 
 # ═══════════════════════════════════════════════════════
@@ -233,11 +227,11 @@ def parse_payout_pdf(pdf_bytes: bytes, filename: str) -> dict:
 st.title("🏪 eMAG Business Intelligence")
 st.markdown("**Central hub pentru toate operațiunile eMAG**")
 
-# Status conexiune Supabase
-if supabase:
-    st.success("✅ Conectat la Supabase")
+# Status conexiune
+if conn:
+    st.success("✅ Conectat la PostgreSQL")
 else:
-    st.warning("⚠️ Supabase nu este disponibil")
+    st.warning("⚠️ PostgreSQL nu este disponibil")
 
 st.divider()
 
@@ -288,13 +282,13 @@ with tab1:
             col1, col2 = st.columns(2)
             
             with col1:
-                if st.button("💾 Salvează în Supabase", type="primary", key="save_pl"):
-                    if supabase:
+                if st.button("💾 Salvează în DB", type="primary", key="save_pl"):
+                    if conn:
                         with st.spinner("Salvare în curs..."):
                             # TODO: Implementare salvare în DB
                             st.info("🚧 Funcționalitate în dezvoltare")
                     else:
-                        st.error("❌ Supabase nu este conectat")
+                        st.error("❌ DB nu este conectat")
             
             with col2:
                 if st.button("📊 Generează raport", key="report_pl"):
@@ -442,11 +436,11 @@ with tab2:
                 col1, col2, col3 = st.columns(3)
                 
                 with col1:
-                    if st.button("💾 Salvează în DB", type="primary", disabled=not supabase, key="save_pdf"):
-                        if supabase:
+                    if st.button("💾 Salvează în DB", type="primary", disabled=not conn, key="save_pdf"):
+                        if conn:
                             st.info("🚧 Funcționalitate în dezvoltare")
                         else:
-                            st.error("❌ Supabase nu este conectat")
+                            st.error("❌ DB nu este conectat")
                 
                 with col2:
                     if st.button("🔍 Reconciliază cu Excel", disabled=True, key="reconcile_pdf"):

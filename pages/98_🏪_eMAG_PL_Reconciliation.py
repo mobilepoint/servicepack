@@ -412,7 +412,7 @@ if conn:
 else:
     st.warning("⚠️ PostgreSQL nu este disponibil")
 
-st.divider()def s
+st.divider()
 
 tab1, tab2, tab3 = st.tabs(["📊 Upload P&L", "📄 Payout PDF Parser", "📑 Breakdown Excel Parser"])
 

@@ -239,7 +239,7 @@ def get_db_stats(conn):
             FROM emag_order_lines;
         """
 
-        result = conn.query(query)
+        result = conn.query(query, ttl=0)
         if len(result) > 0:
             stats = result.iloc[0].to_dict()
             # FIX: Convertește None la 0 pentru toate valorile numerice

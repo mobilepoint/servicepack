@@ -1,6 +1,6 @@
 """
 eMAG P&L Reconciliation + Payout PDF Parser + Breakdown Parser
-Toate funcționalitățile eMAG într-un singur loc
+Toate funcționalitățile eMAG într-un singur loc - cu autentificare
 """
 
 import streamlit as st
@@ -19,16 +19,61 @@ st.set_page_config(
     layout="wide"
 )
 
-# Inițializare Supabase
-try:
-    from supabase import create_client
-    supabase = create_client(
-        st.secrets["SUPABASE_URL"],
-        st.secrets["SUPABASE_KEY"]
-    )
-except Exception as e:
-    st.error(f"⚠️ Eroare conexiune Supabase: {e}")
-    supabase = None
+# ═══════════════════════════════════════════════════════
+# AUTENTIFICARE
+# ═══════════════════════════════════════════════════════
+
+def check_password():
+    """Verifică dacă parola este corectă."""
+    def password_entered():
+        """Verifică parola introdusă."""
+        if st.session_state["password"] == st.secrets["password"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        # Prima rulare, arată input pentru parolă
+        st.text_input(
+            "🔒 Parolă",
+            type="password",
+            on_change=password_entered,
+            key="password"
+        )
+        st.stop()
+    elif not st.session_state["password_correct"]:
+        # Parolă incorectă, arată input + eroare
+        st.text_input(
+            "🔒 Parolă",
+            type="password",
+            on_change=password_entered,
+            key="password"
+        )
+        st.error("😕 Parolă incorectă")
+        st.stop()
+
+# Verificare parolă
+check_password()
+
+# ═══════════════════════════════════════════════════════
+# INIȚIALIZARE SUPABASE
+# ═══════════════════════════════════════════════════════
+
+@st.cache_resource
+def init_supabase():
+    """Inițializează conexiunea Supabase."""
+    try:
+        from supabase import create_client
+        return create_client(
+            st.secrets["supabase"]["url"],
+            st.secrets["supabase"]["key"]
+        )
+    except Exception as e:
+        st.error(f"⚠️ Eroare conexiune Supabase: {e}")
+        return None
+
+supabase = init_supabase()
 
 
 # ═══════════════════════════════════════════════════════
@@ -43,11 +88,14 @@ def calculate_pdf_hash(pdf_bytes: bytes) -> str:
 def extract_text_from_pdf(pdf_bytes: bytes) -> str:
     """Extrage tot textul din PDF."""
     full_text = ""
-    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                full_text += text + "\n"
+    try:
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    full_text += text + "\n"
+    except Exception as e:
+        st.error(f"Eroare la extragere text: {e}")
     return full_text
 
 
@@ -160,8 +208,12 @@ def parse_payout_pdf(pdf_bytes: bytes, filename: str) -> dict:
     total_amount = extract_total_amount(text)
     invoices = extract_invoices(text)
     
-    with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
-        pages_count = len(pdf.pages)
+    pages_count = 0
+    try:
+        with pdfplumber.open(BytesIO(pdf_bytes)) as pdf:
+            pages_count = len(pdf.pages)
+    except:
+        pass
     
     return {
         'pdf_hash': pdf_hash,
@@ -181,6 +233,14 @@ def parse_payout_pdf(pdf_bytes: bytes, filename: str) -> dict:
 st.title("🏪 eMAG Business Intelligence")
 st.markdown("**Central hub pentru toate operațiunile eMAG**")
 
+# Status conexiune Supabase
+if supabase:
+    st.success("✅ Conectat la Supabase")
+else:
+    st.warning("⚠️ Supabase nu este disponibil")
+
+st.divider()
+
 # Tab-uri principale
 tab1, tab2, tab3 = st.tabs([
     "📊 Upload P&L",
@@ -190,7 +250,7 @@ tab1, tab2, tab3 = st.tabs([
 
 
 # ═══════════════════════════════════════════════════════
-# TAB 1: UPLOAD P&L (existent)
+# TAB 1: UPLOAD P&L
 # ═══════════════════════════════════════════════════════
 
 with tab1:
@@ -242,6 +302,8 @@ with tab1:
                     
         except Exception as e:
             st.error(f"❌ Eroare la citire: {str(e)}")
+    else:
+        st.info("👆 Uploadează un fișier Excel pentru a începe")
 
 
 # ═══════════════════════════════════════════════════════
@@ -380,8 +442,11 @@ with tab2:
                 col1, col2, col3 = st.columns(3)
                 
                 with col1:
-                    if st.button("💾 Salvează în DB", type="primary", disabled=True, key="save_pdf"):
-                        st.info("🚧 Funcționalitate în dezvoltare")
+                    if st.button("💾 Salvează în DB", type="primary", disabled=not supabase, key="save_pdf"):
+                        if supabase:
+                            st.info("🚧 Funcționalitate în dezvoltare")
+                        else:
+                            st.error("❌ Supabase nu este conectat")
                 
                 with col2:
                     if st.button("🔍 Reconciliază cu Excel", disabled=True, key="reconcile_pdf"):

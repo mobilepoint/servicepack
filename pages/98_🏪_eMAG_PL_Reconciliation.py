@@ -156,32 +156,32 @@ def extract_invoices(text: str) -> list:
 def extract_payout_info(text: str, filename: str) -> dict:
     """Extrage informații despre payout (ID, date)."""
     info = {
-        'payout_id': None,
+        'payout_id': None,  # Va fi string: "2026-4100309867"
         'payout_date': None,
         'reference_period_start': None,
         'reference_period_end': None
     }
     
-    # ✅ PATTERN 1: Payout ID din TITLU PDF (ex: "2026-4100309867 din | from 18.11.2025")
+    # ✅ PATTERN 1: Payout ID din TITLU PDF (păstrează formatul cu cratimă)
     payout_id_title = re.search(r'(\d{4}-\d{10})\s+(?:din|from)', text, re.IGNORECASE)
     if payout_id_title:
-        info['payout_id'] = int(payout_id_title.group(1).replace('-', ''))
+        info['payout_id'] = payout_id_title.group(1)  # Păstrează "2026-4100309867"
     
     # PATTERN 2: Payout ID din nume fișier (fallback)
     if not info['payout_id']:
         filename_match = re.search(r'_(\d{10,})\.pdf', filename)
         if filename_match:
-            info['payout_id'] = int(filename_match.group(1))
+            info['payout_id'] = filename_match.group(1)  # String
     
     # PATTERN 3: Payout ID din text clasic (fallback)
     if not info['payout_id']:
         payout_id_match = re.search(r'Payout\s+ID[:\s]+(\d+)', text, re.IGNORECASE)
         if payout_id_match:
-            info['payout_id'] = int(payout_id_match.group(1))
+            info['payout_id'] = payout_id_match.group(1)  # String
     
-    # ✅ Extragere DATA - caută "from DD.MM.YYYY" sau "din DD.MM.YYYY"
+    # ✅ Extragere DATA
     date_patterns = [
-        r'(?:from|din)\s+(\d{2}\.\d{2}\.\d{4})',  # from 18.11.2025
+        r'(?:from|din)\s+(\d{2}\.\d{2}\.\d{4})',
         r'Data\s+platii?[:\s]+(\d{2}[-/.]\d{2}[-/.]\d{4})',
         r'Payout\s+date[:\s]+(\d{2}[-/.]\d{2}[-/.]\d{4})',
     ]
@@ -190,7 +190,6 @@ def extract_payout_info(text: str, filename: str) -> dict:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
             date_str = match.group(1)
-            # Încearcă multiple formate
             for date_format in ['%d.%m.%Y', '%d-%m-%Y', '%d/%m/%Y']:
                 try:
                     info['payout_date'] = datetime.strptime(date_str, date_format).date()
@@ -362,11 +361,12 @@ with tab2:
                 col1, col2, col3, col4 = st.columns(4)
                 
                 with col1:
-                    payout_id = result['payout_info'].get('payout_id')
-                    if payout_id:
-                        st.metric("🆔 Payout ID", f"{payout_id:,}")
-                    else:
+                     payout_id = result['payout_info'].get('payout_id')
+                     if payout_id:
+                        st.metric("🆔 Payout ID", payout_id)  # ✅ Afișează direct string
+                     else:
                         st.warning("❌ Payout ID nu a fost găsit")
+
                 
                 with col2:
                     payout_date = result['payout_info'].get('payout_date')

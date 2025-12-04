@@ -343,45 +343,62 @@ def parse_payout_pdf(pdf_bytes: bytes, filename: str) -> dict:
 def save_payout_to_db(result, conn):
     """Salvează în DB un payout parsat."""
     stats = {"inserted_header": 0, "inserted_invoices": 0, "skipped_existing": False, "error": None}
+    
     try:
         with conn.session as session:
-            check_q = text("SELECT id FROM emag_payout_header WHERE pdf_hash = :pdf_hash")
-            existing = session.execute(check_q, {"pdf_hash": result["pdf_hash"]}).fetchone()
+            # CORECȚIE: schimbat pdf_hash -> pdfhash
+            check_q = text("SELECT id FROM emag_payout_header WHERE pdfhash = :pdfhash")
+            existing = session.execute(check_q, {"pdfhash": result["pdfhash"]}).fetchone()
+            
             if existing:
                 stats["skipped_existing"] = True
                 return stats
-
+            
+            # CORECȚIE: schimbat pdf_hash -> pdfhash în INSERT
             insert_header = text("""
-                INSERT INTO emag_payout_header (payout_id, payout_date, total_amount, pages_count, filename, pdf_hash)
-                VALUES (:payout_id, :payout_date, :total_amount, :pages_count, :filename, :pdf_hash)
-                RETURNING id;
+                INSERT INTO emag_payout_header 
+                (payout_id, payout_date, total_amount, pages_count, filename, pdfhash)
+                VALUES (:payout_id, :payout_date, :total_amount, :pages_count, :filename, :pdfhash)
+                RETURNING id
             """)
+            
             payout_info = result["payout_info"]
             header_id = session.execute(insert_header, {
-                "payout_id": payout_info.get("payout_id"), "payout_date": payout_info.get("payout_date"),
-                "total_amount": result.get("total_amount"), "pages_count": result.get("pages_count"),
-                "filename": result.get("filename"), "pdf_hash": result.get("pdf_hash"),
+                "payout_id": payout_info.get("payout_id"),
+                "payout_date": payout_info.get("payout_date"),
+                "total_amount": result.get("total_amount"),
+                "pages_count": result.get("pages_count"),
+                "filename": result.get("filename"),
+                "pdfhash": result.get("pdfhash"),  # CORECȚIE: pdf_hash -> pdfhash
             }).scalar()
+            
             stats["inserted_header"] = 1
-
+            
             invoices = result.get("invoices", []) or []
             if invoices:
                 insert_inv = text("""
-                    INSERT INTO emag_payout_invoices (header_id, invoice_number, invoice_type, invoice_amount, position_in_pdf, raw_line)
-                    VALUES (:header_id, :invoice_number, :invoice_type, :invoice_amount, :position_in_pdf, :raw_line);
+                    INSERT INTO emag_payout_invoices 
+                    (header_id, invoice_number, invoice_type, invoice_amount, position_in_pdf, raw_line)
+                    VALUES (:header_id, :invoice_number, :invoice_type, :invoice_amount, :position_in_pdf, :raw_line)
                 """)
                 for inv in invoices:
                     session.execute(insert_inv, {
-                        "header_id": header_id, "invoice_number": inv.get("invoice_number"),
-                        "invoice_type": inv.get("invoice_type"), "invoice_amount": inv.get("invoice_amount"),
-                        "position_in_pdf": inv.get("position_in_pdf"), "raw_line": inv.get("raw_line"),
+                        "header_id": header_id,
+                        "invoice_number": inv.get("invoice_number"),
+                        "invoice_type": inv.get("invoice_type"),
+                        "invoice_amount": inv.get("invoice_amount"),
+                        "position_in_pdf": inv.get("position_in_pdf"),
+                        "raw_line": inv.get("raw_line"),
                     })
                 stats["inserted_invoices"] = len(invoices)
+            
             session.commit()
             return stats
+            
     except Exception as e:
         stats["error"] = str(e)
         return stats
+
 
 # ═══════════════════════════════════════════════════════
 # MAIN APP
@@ -395,7 +412,7 @@ if conn:
 else:
     st.warning("⚠️ PostgreSQL nu este disponibil")
 
-st.divider()
+st.divider()def s
 
 tab1, tab2, tab3 = st.tabs(["📊 Upload P&L", "📄 Payout PDF Parser", "📑 Breakdown Excel Parser"])
 

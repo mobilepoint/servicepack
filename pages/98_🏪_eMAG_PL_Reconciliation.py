@@ -539,34 +539,23 @@ with tab1:
             col1, col2 = st.columns(2)
 
             with col1:
-                if st.button("💾 Salvează în DB", type="primary", key="save_pl"):
-                    if conn:
-                        with st.spinner("💾 Salvare în PostgreSQL..."):
-                            upload_stats = upload_pl_to_db(df, conn)
+               if st.button("💾 Salvează în DB", type="primary", disabled=not conn, key="save_pdf"):
+               if conn:
+            with st.spinner("💾 Salvez payout-ul în PostgreSQL..."):
+                save_stats = save_payout_to_db(result, conn)
 
-                            if upload_stats['errors'] == 0:
-                                st.success(
-                                    f"✅ **Upload finalizat cu succes!**\n\n"
-                                    f"📊 **{upload_stats['inserted']}** rânduri noi inserate\n"
-                                    f"⏭️ **{upload_stats['skipped']}** rânduri ignorate (duplicate)\n"
-                                    f"📋 **{upload_stats['total_rows']}** total procesate"
-                                )
-                                st.balloons()
-                                st.rerun()
-                            else:
-                                st.warning(
-                                    f"⚠️ **Upload completat cu erori**\n\n"
-                                    f"✅ **{upload_stats['inserted']}** inserate\n"
-                                    f"⏭️ **{upload_stats['skipped']}** ignorate\n"
-                                    f"❌ **{upload_stats['errors']}** erori"
-                                )
-
-                                if upload_stats['error_details']:
-                                    with st.expander("📋 Detalii erori"):
-                                        for err in upload_stats['error_details'][:10]:
-                                            st.error(f"Row {err.get('row')}: {err.get('error')}")
-                    else:
-                        st.error("❌ DB nu este conectat")
+                if save_stats.get("error"):
+                    st.error(f"❌ Eroare la salvare: {save_stats['error']}")
+                elif save_stats.get("skipped_existing"):
+                    st.info("ℹ️ Acest payout există deja în DB (identificat după PDF hash). Nu am inserat din nou.")
+                else:
+                    st.success(
+                        f"✅ Payout salvat cu succes!\n\n"
+                        f"📄 1 header inserat\n"
+                        f"📋 {save_stats['inserted_invoices']} facturi inserate"
+                    )
+        else:
+            st.error("❌ DB nu este conectat")
 
             with col2:
                 if st.button("📊 Generează raport", key="report_pl"):

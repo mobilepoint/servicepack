@@ -691,11 +691,477 @@ with tab2:
         st.info("👆 Uploadează un PDF pentru a începe parsarea")
 
 # ═══════════════════════════════════════════════════════
+# HELPER FUNCTIONS - BREAKDOWN PARSING
+# ═══════════════════════════════════════════════════════
+
+def detect_breakdown_type(filename: str) -> str:
+    """Detectează tipul desfășurător din numele fișierului."""
+    filename_lower = filename.lower()
+    
+    if '_dc_' in filename_lower or 'commission' in filename_lower:
+        return 'DC'
+    elif '_dv_' in filename_lower or 'voucher' in filename_lower:
+        return 'DV'
+    elif '_dp_' in filename_lower or 'payout' in filename_lower or 'plati' in filename_lower:
+        return 'DP'
+    elif '_dy_' in filename_lower or 'return' in filename_lower or 'retur' in filename_lower:
+        return 'DY'
+    elif '_dhdr_' in filename_lower or 'hdr' in filename_lower:
+        return 'DHDR'
+    elif '_dcs_' in filename_lower or 'storno' in filename_lower:
+        return 'DCS'
+    elif '_ded_' in filename_lower or 'delivery' in filename_lower or 'expediere' in filename_lower:
+        return 'DED'
+    else:
+        return 'UNKNOWN'
+
+def parse_breakdown_excel(file_bytes, filename: str, breakdown_type: str) -> pd.DataFrame:
+    """Parsează un fișier Excel desfășurător și returnează DataFrame normalizat."""
+    try:
+        df = pd.read_excel(file_bytes)
+        
+        # Elimină rânduri goale sau header duplicat
+        df = df[df.iloc[:, 0].notna()]
+        
+        # Mapare coloane comune
+        df_normalized = pd.DataFrame()
+        
+        # Coloane comune pentru toate tipurile
+        if 'ID comanda' in df.columns:
+            df_normalized['order_id'] = df['ID comanda'].astype(str)
+        elif 'Order ID' in df.columns:
+            df_normalized['order_id'] = df['Order ID'].astype(str)
+        
+        if 'OLID' in df.columns:
+            df_normalized['olid'] = df['OLID'].astype(str)
+        elif 'OFID' in df.columns:
+            df_normalized['olid'] = df['OFID'].astype(str)
+        
+        if 'PNK' in df.columns:
+            df_normalized['pnk'] = df['PNK']
+        
+        if 'Part number' in df.columns:
+            df_normalized['part_number'] = df['Part number']
+        elif 'Part Number' in df.columns:
+            df_normalized['part_number'] = df['Part Number']
+        
+        if 'Brand' in df.columns:
+            df_normalized['brand'] = df['Brand']
+        
+        if 'Nume produs' in df.columns:
+            df_normalized['nume_produs'] = df['Nume produs']
+        
+        if 'Data comanda' in df.columns:
+            df_normalized['data_comanda'] = pd.to_datetime(df['Data comanda'], errors='coerce')
+        elif 'Order date' in df.columns:
+            df_normalized['data_comanda'] = pd.to_datetime(df['Order date'], errors='coerce')
+        
+        if 'Data finalizare comanda' in df.columns:
+            df_normalized['data_finalizare'] = pd.to_datetime(df['Data finalizare comanda'], errors='coerce')
+        elif 'Order finalization date' in df.columns:
+            df_normalized['data_finalizare'] = pd.to_datetime(df['Order finalization date'], errors='coerce')
+        
+        if 'Cantitate' in df.columns:
+            df_normalized['cantitate'] = pd.to_numeric(df['Cantitate'], errors='coerce')
+        
+        if 'Mod plata' in df.columns:
+            df_normalized['mod_plata'] = df['Mod plata']
+        elif 'Payment method' in df.columns:
+            df_normalized['mod_plata'] = df['Payment method']
+        
+        # Coloane specifice tipului
+        if breakdown_type in ['DC', 'DCS']:
+            if 'Valoare produse' in df.columns:
+                df_normalized['valoare_produse'] = pd.to_numeric(df['Valoare produse'], errors='coerce')
+            if 'Comision Net' in df.columns:
+                df_normalized['comision_net'] = pd.to_numeric(df['Comision Net'], errors='coerce')
+            if 'Valoare vouchere' in df.columns:
+                df_normalized['valoare_vouchere'] = pd.to_numeric(df['Valoare vouchere'], errors='coerce')
+        
+        elif breakdown_type == 'DV':
+            if 'Valoare vouchere' in df.columns:
+                df_normalized['valoare_vouchere'] = pd.to_numeric(df['Valoare vouchere'], errors='coerce')
+        
+        elif breakdown_type == 'DP':
+            if 'Fraction value' in df.columns:
+                df_normalized['valoare_plata'] = pd.to_numeric(df['Fraction value'], errors='coerce')
+        
+        elif breakdown_type == 'DY':
+            if 'Valoare produse' in df.columns:
+                df_normalized['valoare_produse'] = pd.to_numeric(df['Valoare produse'], errors='coerce')
+            if 'Valoare vouchere' in df.columns:
+                df_normalized['valoare_vouchere'] = pd.to_numeric(df['Valoare vouchere'], errors='coerce')
+        
+        elif breakdown_type == 'DHDR':
+            if 'Valoare compensata' in df.columns:
+                df_normalized['valoare_plata'] = pd.to_numeric(df['Valoare compensata'], errors='coerce')
+        
+        elif breakdown_type == 'DED':
+            if 'Valoare produs' in df.columns:
+                df_normalized['valoare_produse'] = pd.to_numeric(df['Valoare produs'], errors='coerce')
+        
+        df_normalized['breakdown_type'] = breakdown_type
+        df_normalized['filename'] = filename
+        
+        return df_normalized
+        
+    except Exception as e:
+        st.error(f"Eroare la parsare {filename}: {str(e)}")
+        return pd.DataFrame()
+
+def save_breakdown_to_db(df: pd.DataFrame, payout_id: str, invoice_number: str, conn) -> dict:
+    """Salvează desfășurătorul în DB."""
+    stats = {'inserted': 0, 'errors': 0, 'error_details': []}
+    
+    try:
+        df['payout_id'] = payout_id
+        df['invoice_number'] = invoice_number
+        
+        insert_query = text("""
+            INSERT INTO emag_breakdown_lines (
+                payout_id, invoice_number, breakdown_type, filename,
+                order_id, olid, pnk, part_number, brand, nume_produs,
+                data_comanda, data_finalizare, cantitate,
+                valoare_produse, comision_net, valoare_vouchere, valoare_plata, mod_plata
+            ) VALUES (
+                :payout_id, :invoice_number, :breakdown_type, :filename,
+                :order_id, :olid, :pnk, :part_number, :brand, :nume_produs,
+                :data_comanda, :data_finalizare, :cantitate,
+                :valoare_produse, :comision_net, :valoare_vouchere, :valoare_plata, :mod_plata
+            );
+        """)
+        
+        with conn.session as session:
+            for idx, row in df.iterrows():
+                try:
+                    session.execute(insert_query, {
+                        'payout_id': row.get('payout_id'),
+                        'invoice_number': row.get('invoice_number'),
+                        'breakdown_type': row.get('breakdown_type'),
+                        'filename': row.get('filename'),
+                        'order_id': row.get('order_id'),
+                        'olid': row.get('olid'),
+                        'pnk': row.get('pnk'),
+                        'part_number': row.get('part_number'),
+                        'brand': row.get('brand'),
+                        'nume_produs': row.get('nume_produs'),
+                        'data_comanda': row.get('data_comanda'),
+                        'data_finalizare': row.get('data_finalizare'),
+                        'cantitate': row.get('cantitate'),
+                        'valoare_produse': row.get('valoare_produse'),
+                        'comision_net': row.get('comision_net'),
+                        'valoare_vouchere': row.get('valoare_vouchere'),
+                        'valoare_plata': row.get('valoare_plata'),
+                        'mod_plata': row.get('mod_plata')
+                    })
+                    stats['inserted'] += 1
+                except Exception as e:
+                    stats['errors'] += 1
+                    stats['error_details'].append({'row': idx, 'error': str(e)})
+            
+            session.commit()
+        
+        return stats
+        
+    except Exception as e:
+        stats['errors'] = len(df)
+        stats['error_details'].append({'global_error': str(e)})
+        return stats
+
+def get_payout_list(conn):
+    """Returnează lista de payout-uri din DB."""
+    try:
+        query = """
+            SELECT payout_id, payout_date, total_amount, filename
+            FROM emag_payout_header
+            ORDER BY payout_date DESC, payout_id DESC;
+        """
+        result = conn.query(query)
+        return result
+    except Exception as e:
+        st.error(f"Eroare la listare payout-uri: {str(e)}")
+        return pd.DataFrame()
+
+def get_payout_invoices(payout_id: str, conn):
+    """Returnează facturile pentru un payout."""
+    try:
+        query = text("""
+            SELECT i.invoice_number, i.invoice_type, i.invoice_amount
+            FROM emag_payout_invoices i
+            JOIN emag_payout_header h ON h.id = i.header_id
+            WHERE h.payout_id = :payout_id
+            ORDER BY i.invoice_type, i.invoice_number;
+        """)
+        with conn.session as session:
+            result = session.execute(query, {'payout_id': payout_id})
+            return pd.DataFrame(result.fetchall(), columns=['invoice_number', 'invoice_type', 'invoice_amount'])
+    except Exception as e:
+        st.error(f"Eroare la citire facturi: {str(e)}")
+        return pd.DataFrame()
+
+# ═══════════════════════════════════════════════════════
 # TAB 3: BREAKDOWN EXCEL PARSER
 # ═══════════════════════════════════════════════════════
+
 with tab3:
     st.header("📑 Breakdown Excel Parser")
-    st.info("🚧 Funcționalitate în dezvoltare - va permite upload desfășurătoare Excel (DC, DV, DP, etc.)")
+    st.markdown("""
+        **Workflow reconciliere:**
+        1. Selectează payout-ul din listă
+        2. Uploadează desfășurătoarele Excel pentru fiecare factură
+        3. Sistemul verifică automat reconcilierea
+        4. Vezi raportul de profit final
+    """)
+    
+    st.divider()
+    
+    if not conn:
+        st.warning("⚠️ PostgreSQL nu este disponibil")
+        st.stop()
+    
+    # STEP 1: Selectează payout
+    st.subheader("1️⃣ Selectează Payout")
+    
+    payouts = get_payout_list(conn)
+    
+    if len(payouts) == 0:
+        st.info("📭 Nu există payout-uri în DB. Uploadează mai întâi un PDF în Tab 2.")
+        st.stop()
+    
+    # Creează opțiuni pentru selectbox
+    payout_options = [
+        f"{row['payout_id']} - {row['payout_date']} ({row['total_amount']:.2f} RON)"
+        for _, row in payouts.iterrows()
+    ]
+    
+    selected_payout_str = st.selectbox(
+        "Alege payout-ul:",
+        options=payout_options,
+        key="selected_payout"
+    )
+    
+    if selected_payout_str:
+        selected_payout_id = selected_payout_str.split(' - ')[0]
+        
+        # Afișează facturile pentru payout-ul selectat
+        st.subheader(f"📋 Facturi pentru payout {selected_payout_id}")
+        
+        invoices_df = get_payout_invoices(selected_payout_id, conn)
+        
+        if len(invoices_df) > 0:
+            # Mapare tipuri facturi
+            type_mapping = {
+                'C': '💼 Comisioane',
+                'V': '🎟️ Vouchere',
+                'E': '💰 Încasări',
+                'Y': '🔄 Retururi',
+                'H': '⚖️ Compensări',
+                'D': '📦 Diverse'
+            }
+            
+            invoices_df['Tip'] = invoices_df['invoice_type'].map(type_mapping)
+            invoices_df['Sumă'] = invoices_df['invoice_amount'].apply(
+                lambda x: f"{x:,.2f} RON" if pd.notna(x) else 'N/A'
+            )
+            
+            st.dataframe(
+                invoices_df[['invoice_number', 'Tip', 'Sumă']],
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.divider()
+            
+            # STEP 2: Upload desfășurătoare
+            st.subheader("2️⃣ Uploadează Desfășurătoare")
+            
+            st.info(f"""
+                📌 **Ghid upload:**
+                - Uploadează câte un fișier Excel pentru fiecare factură
+                - Sistemul detectează automat tipul din nume (dc, dv, dp, dy, etc.)
+                - Poți uploada toate desfășurătoarele simultan
+            """)
+            
+            uploaded_breakdowns = st.file_uploader(
+                "Selectează fișiere Excel (poți selecta multiple)",
+                type=['xlsx', 'xls'],
+                accept_multiple_files=True,
+                key="breakdown_uploader"
+            )
+            
+            if uploaded_breakdowns:
+                st.success(f"✅ {len(uploaded_breakdowns)} fișiere încărcate")
+                
+                # Preview fișiere
+                breakdown_info = []
+                for file in uploaded_breakdowns:
+                    bd_type = detect_breakdown_type(file.name)
+                    breakdown_info.append({
+                        'Fișier': file.name,
+                        'Tip detectat': bd_type,
+                        'Dimensiune': f"{file.size / 1024:.1f} KB"
+                    })
+                
+                st.dataframe(pd.DataFrame(breakdown_info), use_container_width=True, hide_index=True)
+                
+                st.divider()
+                
+                # STEP 3: Asociere facturi
+                st.subheader("3️⃣ Asociere Facturi")
+                
+                # Pentru fiecare fișier, lasă user-ul să selecteze factura
+                file_invoice_mapping = {}
+                
+                for file in uploaded_breakdowns:
+                    bd_type = detect_breakdown_type(file.name)
+                    
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        st.text(f"📄 {file.name} ({bd_type})")
+                    
+                    with col2:
+                        selected_invoice = st.selectbox(
+                            "Factură:",
+                            options=invoices_df['invoice_number'].tolist(),
+                            key=f"invoice_{file.name}",
+                            label_visibility="collapsed"
+                        )
+                        file_invoice_mapping[file.name] = selected_invoice
+                
+                st.divider()
+                
+                # STEP 4: Salvare
+                if st.button("💾 Salvează toate desfășurătoarele", type="primary", key="save_breakdowns"):
+                    with st.spinner("💾 Procesez și salvez desfășurătoarele..."):
+                        total_stats = {'inserted': 0, 'errors': 0, 'files_processed': 0}
+                        
+                        progress_bar = st.progress(0)
+                        
+                        for idx, file in enumerate(uploaded_breakdowns):
+                            bd_type = detect_breakdown_type(file.name)
+                            invoice_num = file_invoice_mapping[file.name]
+                            
+                            # Parsează Excel
+                            df_parsed = parse_breakdown_excel(file, file.name, bd_type)
+                            
+                            if len(df_parsed) > 0:
+                                # Salvează în DB
+                                stats = save_breakdown_to_db(
+                                    df_parsed,
+                                    selected_payout_id,
+                                    invoice_num,
+                                    conn
+                                )
+                                
+                                total_stats['inserted'] += stats['inserted']
+                                total_stats['errors'] += stats['errors']
+                                total_stats['files_processed'] += 1
+                            
+                            progress_bar.progress((idx + 1) / len(uploaded_breakdowns))
+                        
+                        progress_bar.empty()
+                        
+                        if total_stats['errors'] == 0:
+                            st.success(f"""
+                                ✅ **Upload finalizat cu succes!**
+                                
+                                📊 **{total_stats['files_processed']}** fișiere procesate
+                                📝 **{total_stats['inserted']}** linii inserate în DB
+                            """)
+                            st.balloons()
+                        else:
+                            st.warning(f"""
+                                ⚠️ **Upload completat cu erori**
+                                
+                                ✅ **{total_stats['inserted']}** inserate
+                                ❌ **{total_stats['errors']}** erori
+                            """)
+                
+                st.divider()
+                
+                # STEP 5: Reconciliere & Raport
+                st.subheader("4️⃣ Reconciliere & Raport Profit")
+                
+                if st.button("📊 Generează raport reconciliere", key="generate_report"):
+                    with st.spinner("📊 Calculez reconcilierea..."):
+                        
+                        # Query reconciliere
+                        reconcile_query = text("""
+                            SELECT 
+                                i.invoice_number,
+                                i.invoice_type,
+                                i.invoice_amount as invoice_total,
+                                COALESCE(SUM(
+                                    COALESCE(b.comision_net, 0) + 
+                                    COALESCE(b.valoare_vouchere, 0) + 
+                                    COALESCE(b.valoare_plata, 0) +
+                                    COALESCE(b.valoare_produse, 0)
+                                ), 0) as breakdown_total,
+                                COUNT(DISTINCT b.order_id) as nr_comenzi,
+                                COUNT(b.id) as nr_linii
+                            FROM emag_payout_invoices i
+                            JOIN emag_payout_header h ON h.id = i.header_id
+                            LEFT JOIN emag_breakdown_lines b ON b.invoice_number = i.invoice_number
+                            WHERE h.payout_id = :payout_id
+                            GROUP BY i.invoice_number, i.invoice_type, i.invoice_amount
+                            ORDER BY i.invoice_type, i.invoice_number;
+                        """)
+                        
+                        with conn.session as session:
+                            result = session.execute(reconcile_query, {'payout_id': selected_payout_id})
+                            reconcile_df = pd.DataFrame(result.fetchall(), 
+                                columns=['invoice_number', 'invoice_type', 'invoice_total', 
+                                        'breakdown_total', 'nr_comenzi', 'nr_linii'])
+                        
+                        if len(reconcile_df) > 0:
+                            reconcile_df['Diferență'] = reconcile_df['invoice_total'] - reconcile_df['breakdown_total']
+                            reconcile_df['Status'] = reconcile_df['Diferență'].apply(
+                                lambda x: '✅ OK' if abs(x) < 0.01 else '⚠️ Diferență'
+                            )
+                            
+                            st.dataframe(reconcile_df, use_container_width=True, hide_index=True)
+                            
+                            # Profit query
+                            st.subheader("💰 Raport Profit")
+                            
+                            profit_query = """
+                                SELECT 
+                                    order_id,
+                                    pnk,
+                                    produs,
+                                    cantitate,
+                                    vanzari,
+                                    comision,
+                                    vanzari_nete,
+                                    cost_achizitie_unitar,
+                                    cost_achizitie_total,
+                                    profit
+                                FROM v_order_profit
+                                ORDER BY data DESC
+                                LIMIT 100;
+                            """
+                            
+                            profit_df = conn.query(profit_query)
+                            
+                            if len(profit_df) > 0:
+                                total_profit = profit_df['profit'].sum()
+                                total_vanzari = profit_df['vanzari_nete'].sum()
+                                
+                                col1, col2, col3 = st.columns(3)
+                                with col1:
+                                    st.metric("💰 Total Vânzări Nete", f"{total_vanzari:,.2f} RON")
+                                with col2:
+                                    st.metric("📈 Profit Total", f"{total_profit:,.2f} RON")
+                                with col3:
+                                    margin = (total_profit / total_vanzari * 100) if total_vanzari > 0 else 0
+                                    st.metric("📊 Marjă Profit", f"{margin:.1f}%")
+                                
+                                st.dataframe(profit_df.head(50), use_container_width=True, hide_index=True)
+                        else:
+                            st.info("Nu există date de reconciliere pentru acest payout.")
+        else:
+            st.warning("⚠️ Payout-ul selectat nu are facturi asociate.")
 
 # ═══════════════════════════════════════════════════════
 # FOOTER

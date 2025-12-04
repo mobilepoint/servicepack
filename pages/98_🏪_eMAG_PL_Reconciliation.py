@@ -346,20 +346,19 @@ def save_payout_to_db(result, conn):
     
     try:
         with conn.session as session:
-            # CORECȚIE: schimbat pdf_hash -> pdfhash
-            check_q = text("SELECT id FROM emag_payout_header WHERE pdfhash = :pdfhash")
-            existing = session.execute(check_q, {"pdfhash": result["pdfhash"]}).fetchone()
+            # Folosește pdf_hash (cu underscore) - consistent cu dicționarul result
+            check_q = text("SELECT id FROM emag_payout_header WHERE pdf_hash = :pdf_hash")
+            existing = session.execute(check_q, {"pdf_hash": result["pdf_hash"]}).fetchone()
             
             if existing:
                 stats["skipped_existing"] = True
                 return stats
             
-            # CORECȚIE: schimbat pdf_hash -> pdfhash în INSERT
             insert_header = text("""
                 INSERT INTO emag_payout_header 
-                (payout_id, payout_date, total_amount, pages_count, filename, pdfhash)
-                VALUES (:payout_id, :payout_date, :total_amount, :pages_count, :filename, :pdfhash)
-                RETURNING id
+                (payout_id, payout_date, total_amount, pages_count, filename, pdf_hash)
+                VALUES (:payout_id, :payout_date, :total_amount, :pages_count, :filename, :pdf_hash)
+                RETURNING id;
             """)
             
             payout_info = result["payout_info"]
@@ -369,7 +368,7 @@ def save_payout_to_db(result, conn):
                 "total_amount": result.get("total_amount"),
                 "pages_count": result.get("pages_count"),
                 "filename": result.get("filename"),
-                "pdfhash": result.get("pdfhash"),  # CORECȚIE: pdf_hash -> pdfhash
+                "pdf_hash": result.get("pdf_hash"),  # cu underscore!
             }).scalar()
             
             stats["inserted_header"] = 1
@@ -379,7 +378,7 @@ def save_payout_to_db(result, conn):
                 insert_inv = text("""
                     INSERT INTO emag_payout_invoices 
                     (header_id, invoice_number, invoice_type, invoice_amount, position_in_pdf, raw_line)
-                    VALUES (:header_id, :invoice_number, :invoice_type, :invoice_amount, :position_in_pdf, :raw_line)
+                    VALUES (:header_id, :invoice_number, :invoice_type, :invoice_amount, :position_in_pdf, :raw_line);
                 """)
                 for inv in invoices:
                     session.execute(insert_inv, {

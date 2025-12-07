@@ -6,6 +6,8 @@ from datetime import datetime, timedelta
 import requests
 import time
 import json
+from sidebar import render_sidebar
+from auth_simple import check_password
 
 # AUTENTIFICARE
 if not check_password():

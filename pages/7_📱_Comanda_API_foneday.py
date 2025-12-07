@@ -368,11 +368,11 @@ def step1_import_foneday_all_products():
 
 # ============ PASUL 2: Mapare SKU ============
 def step2_map_sku_to_artcode():
-    """PASUL 2: Mapare SKU-uri - compară TOATE SKU-urile tale (inclusiv sinonime) cu artcodes Foneday"""
+    """PASUL 2: Mapare la nivel de PRODUS (UUID) - evită duplicate pentru sinonime"""
     progress_bar = st.progress(0)
     status_container = st.empty()
     
-    log_event("step2_start", "PASUL 2: Începe mapare SKU → Foneday", status="info")
+    log_event("step2_start", "PASUL 2: Începe mapare produse → Foneday", status="info")
     
     conn = None
     try:
@@ -383,28 +383,24 @@ def step2_map_sku_to_artcode():
         
         cursor = conn.cursor()
         
-        status_container.info("📂 PASUL 2: Citesc TOATE SKU-urile din catalogul tău (inclusiv sinonime)...")
+        status_container.info("📂 PASUL 2: Citesc produsele și SKU-urile din catalog...")
         
-        # Citește TOATE SKU-urile din product_sku (nu doar primare!)
+        # Citește TOATE SKU-urile cu product_id
         cursor.execute("""
             SELECT ps.sku, ps.product_id, ps.is_primary
             FROM product_sku ps
             WHERE ps.sku IS NOT NULL AND ps.sku != ''
         """)
-        all_my_skus = cursor.fetchall()
+        all_skus = cursor.fetchall()
         
-        if not all_my_skus:
+        if not all_skus:
             st.warning("Nu există SKU-uri în catalogul tău")
             log_event("step2_warning", "Nu există SKU-uri de mapat", status="warning")
             cursor.close()
             return 0
         
-        # Numără câte sunt primare vs secundare
-        primary_count = sum(1 for _, _, is_prim in all_my_skus if is_prim)
-        secondary_count = len(all_my_skus) - primary_count
-        
-        status_container.success(f"✅ Total {len(all_my_skus)} SKU-uri: {primary_count} primare + {secondary_count} sinonime")
-        log_event("step2_process", f"Procesez {len(all_my_skus)} SKU-uri", status="info")
+        status_container.success(f"✅ Citite {len(all_skus)} SKU-uri din catalog")
+        log_event("step2_process", f"Procesez {len(all_skus)} SKU-uri", status="info")
         progress_bar.progress(0.3)
         
         status_container.info("📂 Citesc artcode-urile din Foneday...")
@@ -422,56 +418,102 @@ def step2_map_sku_to_artcode():
             cursor.close()
             return 0
         
-        status_container.success(f"✅ Total {len(all_artcodes)} artcode-uri din Foneday")
+        status_container.success(f"✅ Citite {len(all_artcodes)} artcode-uri din Foneday")
         log_event("step2_process", f"Procesez {len(all_artcodes)} artcodes", status="info")
         progress_bar.progress(0.6)
         
-        status_container.info("🔗 Compar și creez mapări...")
+        status_container.info("🔗 Mapare la nivel de PRODUS (UUID)...")
         
-        # Creează dicționar pentru mapare rapidă: artcode -> lista de foneday_sku
-        artcode_dict = {}
+        # Creează dicționar: artcode -> lista de foneday_sku
+        artcode_to_foneday = {}
         for foneday_sku, artcode in all_artcodes:
-            if artcode not in artcode_dict:
-                artcode_dict[artcode] = []
-            artcode_dict[artcode].append(foneday_sku)
+            if artcode not in artcode_to_foneday:
+                artcode_to_foneday[artcode] = []
+            artcode_to_foneday[artcode].append(foneday_sku)
         
-        # Compară TOATE SKU-urile tale (inclusiv sinonime) cu artcodes Foneday
+        # Grupează SKU-uri pe PRODUS (product_id = UUID)
+        # product_id -> {"primary_sku": ..., "all_skus": [...], "is_primary": ...}
+        products_dict = {}
+        
+        for sku, product_id, is_primary in all_skus:
+            if product_id not in products_dict:
+                products_dict[product_id] = {
+                    "primary_sku": None,
+                    "all_skus": [],
+                    "matching_skus": []  # SKU-uri care au match în Foneday
+                }
+            
+            products_dict[product_id]["all_skus"].append(sku)
+            
+            # Setează SKU-ul primar
+            if is_primary:
+                products_dict[product_id]["primary_sku"] = sku
+            
+            # Verifică dacă SKU-ul match-uiește cu Foneday
+            if sku in artcode_to_foneday:
+                products_dict[product_id]["matching_skus"].append({
+                    "sku": sku,
+                    "is_primary": is_primary,
+                    "foneday_skus": artcode_to_foneday[sku]
+                })
+        
+        # Creează mapări la nivel de PRODUS
+        # Regula: pentru fiecare produs, alege UN SINGUR SKU pentru mapare
+        # Prioritate: SKU primar care match-uiește, altfel primul SKU care match-uiește
+        
         batch_mappings = []
-        matches_count = 0
-        primary_matches = 0
-        secondary_matches = 0
+        products_mapped = 0
+        total_foneday_matches = 0
+        skipped_no_primary = 0
         
-        for my_sku, product_id, is_primary in all_my_skus:
-            # Verifică dacă SKU-ul tău apare în artcodes Foneday
-            if my_sku in artcode_dict:
-                matches_count += 1
-                if is_primary:
-                    primary_matches += 1
-                else:
-                    secondary_matches += 1
-                
-                # Poate exista mai mult de un produs Foneday cu același artcode
-                for foneday_sku in artcode_dict[my_sku]:
-                    batch_mappings.append((
-                        my_sku,           # SKU-ul tău (poate fi primar sau sinonim)
-                        my_sku,           # foneday_artcode (același cu SKU-ul tău)
-                        foneday_sku,      # SKU-ul produsului în Foneday
-                        product_id,       # ID-ul produsului tău (UUID)
-                        100,              # mapping_score (100 = match exact)
-                        datetime.now()
-                    ))
+        for product_id, product_data in products_dict.items():
+            matching_skus = product_data["matching_skus"]
+            
+            if not matching_skus:
+                # Produsul nu are niciun SKU care match-uiește cu Foneday
+                continue
+            
+            # Alege SKU-ul de folosit pentru mapare
+            # Prioritate 1: SKU-ul PRIMAR care match-uiește
+            primary_match = next((m for m in matching_skus if m["is_primary"]), None)
+            
+            if primary_match:
+                selected_sku = primary_match["sku"]
+                selected_foneday_skus = primary_match["foneday_skus"]
+            else:
+                # Prioritate 2: primul SKU care match-uiește
+                selected_sku = matching_skus[0]["sku"]
+                selected_foneday_skus = matching_skus[0]["foneday_skus"]
+            
+            # Dacă nu există SKU primar deloc pentru produs, folosește SKU-ul selectat
+            if not product_data["primary_sku"]:
+                product_data["primary_sku"] = selected_sku
+            
+            # Creează mapări pentru fiecare foneday_sku găsit
+            for foneday_sku in selected_foneday_skus:
+                batch_mappings.append((
+                    selected_sku,        # SKU-ul ales (primar sau primul match)
+                    selected_sku,        # foneday_artcode (același cu SKU-ul)
+                    foneday_sku,         # SKU-ul produsului în Foneday
+                    product_id,          # UUID-ul produsului
+                    100,                 # mapping_score
+                    datetime.now()
+                ))
+                total_foneday_matches += 1
+            
+            products_mapped += 1
         
         status_container.success(f"""
-        ✅ Găsite {matches_count} SKU-uri cu match în Foneday:
-        - {primary_matches} SKU-uri primare
-        - {secondary_matches} sinonime
-        - {len(batch_mappings)} mapări totale (cu duplicate Foneday)
+        ✅ Mapare completă la nivel de PRODUS:
+        - {products_mapped} produse UNICE mapate
+        - {total_foneday_matches} legături către produse Foneday
+        - {len(products_dict) - products_mapped} produse fără match în Foneday
         """)
-        log_event("step2_process", f"Create {len(batch_mappings)} mapări din {len(all_my_skus)} SKU-uri", status="info")
+        log_event("step2_process", f"{products_mapped} produse mapate cu {total_foneday_matches} legături Foneday", status="info")
         progress_bar.progress(0.8)
         
         if not batch_mappings:
-            st.warning("⚠️ Nu s-au găsit match-uri între SKU-urile tale și Foneday!")
+            st.warning("⚠️ Nu s-au găsit match-uri între produsele tale și Foneday!")
             st.info("""
             **Posibile cauze:**
             - SKU-urile tale nu apar în câmpul `artcode` din produsele Foneday
@@ -483,14 +525,9 @@ def step2_map_sku_to_artcode():
         
         status_container.info("💾 Salvez mapări în baza de date...")
         
-        # Șterge mapările vechi (optional - sau comentează dacă vrei să păstrezi istoric)
-        # cursor.execute("DELETE FROM public.sku_artcode_mapping")
-        # conn.commit()
-        
         # Salvează mapările în batch-uri
         batch_size = 500
         total_saved = 0
-        errors = 0
         
         for i in range(0, len(batch_mappings), batch_size):
             batch = batch_mappings[i:i+batch_size]
@@ -509,72 +546,50 @@ def step2_map_sku_to_artcode():
                 total_saved += len(batch)
                 status_container.info(f"💾 Salvate {total_saved}/{len(batch_mappings)} mapări...")
             except Exception as e:
-                errors += 1
-                log_event("step2_error", f"Eroare salvare batch {i//batch_size + 1}: {str(e)}", status="error")
-                st.error(f"⚠️ Eroare salvare batch {i//batch_size + 1}: {str(e)}")
+                log_event("step2_error", f"Eroare salvare batch: {str(e)}", status="error")
+                st.error(f"⚠️ Eroare salvare: {str(e)}")
                 conn.rollback()
-                
-                # Încearcă să salveze una câte una pentru debugging
-                if errors <= 3:  # Încearcă maximum 3 batch-uri cu erori
-                    st.warning(f"Încerc salvare individuală pentru batch-ul {i//batch_size + 1}...")
-                    for mapping in batch:
-                        try:
-                            cursor.execute("""
-                                INSERT INTO public.sku_artcode_mapping 
-                                (my_sku, foneday_artcode, foneday_sku, product_id, mapping_score, last_verified_at)
-                                VALUES (%s, %s, %s, %s, %s, %s)
-                                ON CONFLICT (my_sku, foneday_artcode) DO UPDATE SET
-                                    foneday_sku = EXCLUDED.foneday_sku,
-                                    product_id = EXCLUDED.product_id,
-                                    mapping_score = EXCLUDED.mapping_score,
-                                    last_verified_at = EXCLUDED.last_verified_at
-                            """, mapping)
-                            conn.commit()
-                            total_saved += 1
-                        except Exception as e2:
-                            st.error(f"Eroare SKU {mapping[0]}: {str(e2)}")
-                            conn.rollback()
-                            continue
+                continue
         
-        # Numără total mapări în DB
+        # Numără total mapări și produse unice în DB
         cursor.execute("SELECT COUNT(*) FROM public.sku_artcode_mapping")
-        total_in_db = cursor.fetchone()[0]
+        total_mappings_db = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(DISTINCT product_id) FROM public.sku_artcode_mapping WHERE product_id IS NOT NULL")
+        unique_products_db = cursor.fetchone()[0]
         
         cursor.close()
         
         progress_bar.progress(1.0)
         status_container.empty()
         
-        success_msg = f"PASUL 2 complet: {total_saved} mapări salvate, {total_in_db} total în DB"
+        success_msg = f"PASUL 2 complet: {products_mapped} produse, {total_saved} mapări"
         log_event("step2_complete", success_msg, status="success")
         
         st.success(f"""
-        ✅ **PASUL 2 FINALIZAT:**
-        - 🔗 **{matches_count} SKU-uri** din catalogul tău au corespondent în Foneday
-          - {primary_matches} SKU-uri primare
-          - {secondary_matches} sinonime
-        - 💾 **{total_saved} mapări** procesate și salvate
-        - 📊 **{total_in_db} mapări** totale în baza de date
-        - 💡 Acum poți căuta produse disponibile în Foneday (PASUL 3)
+        ✅ **PASUL 2 FINALIZAT - Mapare la nivel de PRODUS:**
+        
+        - 🎯 **{products_mapped} produse UNICE** au corespondent în Foneday
+        - 🔗 **{total_saved} mapări** create (un produs poate avea mai multe opțiuni Foneday)
+        - 📊 **{unique_products_db} produse unice** în baza de date
+        - 💡 **Fără duplicate** - fiecare produs e mapat o singură dată, indiferent de câte sinonime SKU are
+        
+        **Detalii:**
+        - Prioritate SKU primar când există match
+        - Un produs = o singură intrare în coș (chiar dacă are mai multe SKU-uri)
+        - Gata pentru PASUL 3 (verificare stoc zero)
         """)
         
-        if errors > 0:
-            st.warning(f"⚠️ Au fost {errors} erori la salvare. Verifică log-urile pentru detalii.")
-        
-        return total_in_db
+        return unique_products_db
     except Exception as e:
         error_msg = f"Eroare PASUL 2: {e}"
         st.error(f"❌ {error_msg}")
         log_event("step2_error", error_msg, status="error")
-        
-        # Afișează traceback pentru debugging
-        import traceback
-        st.code(traceback.format_exc())
-        
         return 0
     finally:
         if conn:
             conn.close()
+
 
 
 # ============ PASUL 3: Verifică stoc ============

@@ -7,6 +7,13 @@ import requests
 import time
 import json
 
+# AUTENTIFICARE
+if not check_password():
+    st.stop()
+
+# SIDEBAR
+render_sidebar()
+
 # ===== CONFIGURARE PAGINĂ =====
 st.set_page_config(
     page_title="📱 Comanda API Foneday",

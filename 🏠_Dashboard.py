@@ -26,18 +26,18 @@ st.divider()
 col1, col2, col3, col4 = st.columns(4)
 
 connection_status = check_all_connections()
-total_connections = sum(1 for conn in ["postgresql", "woocommerce", "smartbill", "foneday", "emag"]
-                       if connection_status[conn]["status"])
+total_connections = sum(1 for conn in ["postgresql", "woocommerce", "smartbill", "foneday"]
+                        if connection_status[conn]["status"])
 
 with col1:
     st.metric(
         label="🔌 Conexiuni Active",
-        value=f"{total_connections}/5",
-        delta="Toate funcționale" if total_connections == 5 else f"{5-total_connections} inactive"
+        value=f"{total_connections}/4",
+        delta="Toate funcționale" if total_connections == 4 else f"{4-total_connections} inactive"
     )
 
 with col2:
-    status_emoji = "✅ Activ" if total_connections == 5 else "⚠️ Parțial" if total_connections > 0 else "❌ Inactiv"
+    status_emoji = "✅ Activ" if total_connections == 4 else "⚠️ Parțial" if total_connections > 0 else "❌ Inactiv"
     st.metric(
         label="📊 Status General",
         value=status_emoji
@@ -62,10 +62,11 @@ st.divider()
 # === STATUS DETALIAT CONEXIUNI ===
 st.markdown("### 🔍 Status Sistem")
 
-if total_connections == 5:
+if total_connections == 4:
     st.success("✅ **Toate conexiunile sunt active!** Sistemul funcționează optim.")
 elif total_connections > 0:
     st.warning("⚠️ **Unele conexiuni au eșuat.** Verifică detaliile în sidebar.")
+    
     # Afișează care conexiuni au eșuat
     failed_connections = [name for name, status in connection_status.items() if not status["status"]]
     if failed_connections:
@@ -93,11 +94,6 @@ CIF = "ROxxxxxx"
 [connections.foneday]
 API_URL = "https://foneday.shop/api/v1"
 API_TOKEN = "eyJ0eXAi..."
-
-[connections.emag]
-USERNAME = "your_username"
-PASSWORD = "your_password"
-API_URL = "https://marketplace-api.emag.ro/api-3"
 """, language="toml")
 
 st.divider()

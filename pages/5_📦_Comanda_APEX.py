@@ -3,7 +3,7 @@
 Pagina 5: Generator comandă APEX
 - Normalizare fișiere APEX (multi-sheet, auto-header)
 - Salvare date normalizate în BD (pentru comparații prețuri)
-- Mapare pe catalog Supabase
+- Mapare pe catalog
 - Generare rapoarte
 """
 
@@ -18,6 +18,24 @@ import psycopg2
 from sidebar import render_sidebar
 
 # =========================
+# VERIFICARE AUTENTIFICARE (ca în celelalte pagini)
+# =========================
+if "authenticated" not in st.session_state:
+    st.session_state.authenticated = False
+
+if not st.session_state.authenticated:
+    st.title("🔒 Autentificare")
+    password = st.text_input("Parolă:", type="password")
+
+    if st.button("Intră", type="primary"):
+        if password == st.secrets.get("password", ""):
+            st.session_state.authenticated = True
+            st.rerun()
+        else:
+            st.error("Parolă incorectă!")
+    st.stop()
+
+# =========================
 # CONFIG & CONSTANTE
 # =========================
 st.set_page_config(page_title="🚚 Comandă APEX", page_icon="🚚", layout="wide")
@@ -26,31 +44,7 @@ ALLOWED_ROUNDINGS = [1, 3, 5, 10, 20, 50]
 EUR_TO_RON = Decimal("5.1")
 
 # =========================
-# VERIFICARE PAROLĂ
-# =========================
-if "apex_authenticated" not in st.session_state:
-    st.session_state.apex_authenticated = False
-
-if not st.session_state.apex_authenticated:
-    st.title("🔒 Acces Pagina APEX")
-    st.info("Introduceți parola pentru a accesa modulul de comenzi APEX")
-
-    password = st.text_input("Parolă:", type="password", key="apex_password")
-
-    if st.button("🔓 Autentificare", type="primary"):
-        # Verifică parola din secrets
-        correct_password = st.secrets.get("apex_password", "apex2024")
-
-        if password == correct_password:
-            st.session_state.apex_authenticated = True
-            st.success("✅ Autentificat cu succes!")
-            st.rerun()
-        else:
-            st.error("❌ Parolă incorectă!")
-    st.stop()
-
-# =========================
-# SIDEBAR
+# SIDEBAR (ca în celelalte pagini)
 # =========================
 render_sidebar()
 
@@ -61,7 +55,7 @@ st.title("🚚 Generator comenzi APEX")
 st.caption("Normalizare APEX → Salvare BD → Mapare catalog → Raport comenzi")
 
 # =========================
-# CONEXIUNE DATABASE
+# CONEXIUNE DATABASE (ca în celelalte pagini)
 # =========================
 @st.cache_resource
 def get_db_connection():

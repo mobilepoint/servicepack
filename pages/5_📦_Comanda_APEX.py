@@ -1,4 +1,4 @@
-# pages/5_📦_Comanda_APEX.py
+# pages/5_🚚_Comanda_APEX.py
 """
 Pagina 5: Generator comandă APEX
 - Normalizare fișiere APEX (multi-sheet, auto-header)
@@ -13,32 +13,66 @@ import csv
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import pandas as pd
 import streamlit as st
-from supabase import create_client
 from datetime import datetime
+import psycopg2
+from sidebar import render_sidebar
 
 # =========================
 # CONFIG & CONSTANTE
 # =========================
-st.set_page_config(page_title="📦 Comandă APEX", page_icon="📦", layout="wide")
+st.set_page_config(page_title="🚚 Comandă APEX", page_icon="🚚", layout="wide")
 
 ALLOWED_ROUNDINGS = [1, 3, 5, 10, 20, 50]
 EUR_TO_RON = Decimal("5.1")
 
-st.title("📦 Generator comandă APEX")
+# =========================
+# VERIFICARE PAROLĂ
+# =========================
+if "apex_authenticated" not in st.session_state:
+    st.session_state.apex_authenticated = False
+
+if not st.session_state.apex_authenticated:
+    st.title("🔒 Acces Pagina APEX")
+    st.info("Introduceți parola pentru a accesa modulul de comenzi APEX")
+
+    password = st.text_input("Parolă:", type="password", key="apex_password")
+
+    if st.button("🔓 Autentificare", type="primary"):
+        # Verifică parola din secrets
+        correct_password = st.secrets.get("apex_password", "apex2024")
+
+        if password == correct_password:
+            st.session_state.apex_authenticated = True
+            st.success("✅ Autentificat cu succes!")
+            st.rerun()
+        else:
+            st.error("❌ Parolă incorectă!")
+    st.stop()
+
+# =========================
+# SIDEBAR
+# =========================
+render_sidebar()
+
+# =========================
+# HEADER
+# =========================
+st.title("🚚 Generator comenzi APEX")
 st.caption("Normalizare APEX → Salvare BD → Mapare catalog → Raport comenzi")
 
 # =========================
-# SECRETS (Supabase)
+# CONEXIUNE DATABASE
 # =========================
-sb = st.secrets.get("supabase", {})
-SUPABASE_URL = sb.get("url", "")
-SUPABASE_ANON = sb.get("anon_key", "")
-
-if not SUPABASE_URL or not SUPABASE_ANON:
-    st.error("Lipsește [supabase] url / anon_key în Secrets.")
-    st.stop()
-
-client = create_client(SUPABASE_URL, SUPABASE_ANON)
+@st.cache_resource
+def get_db_connection():
+    """Obține conexiunea la PostgreSQL din secrets"""
+    try:
+        pg_url = st.secrets["connections"]["postgresql"]["url"]
+        conn = psycopg2.connect(pg_url, connect_timeout=10)
+        return conn
+    except Exception as e:
+        st.error(f"❌ Eroare conexiune DB: {e}")
+        return None
 
 # =========================
 # HELPERS (din apex.py original)
@@ -184,21 +218,22 @@ def _promote_header_row(df: pd.DataFrame):
     return df
 
 @st.cache_data(ttl=600, show_spinner=False)
-def load_sku_mapping_from_supabase() -> pd.DataFrame:
-    """Încarcă view-ul v_sku_mapping din Supabase."""
-    batch, start, rows = 1000, 0, []
-    while True:
-        resp = client.table("v_sku_mapping").select("*").range(start, start + batch - 1).execute()
-        data = resp.data or []
-        rows.extend(data)
-        if len(data) < batch:
-            break
-        start += batch
-    df = pd.DataFrame(rows)
-    if df.empty:
+def load_sku_mapping_from_db() -> pd.DataFrame:
+    """Încarcă view-ul v_sku_mapping din PostgreSQL."""
+    conn = get_db_connection()
+    if not conn:
         return pd.DataFrame(columns=["sku_any", "primary_sku", "denumire_db"])
-    df = df.drop_duplicates(subset=["sku_any"])
-    return df[["sku_any", "primary_sku", "denumire_db"]].copy()
+
+    try:
+        query = "SELECT sku_any, primary_sku, denumire_db FROM v_sku_mapping;"
+        df = pd.read_sql(query, conn)
+        df = df.drop_duplicates(subset=["sku_any"])
+        return df[["sku_any", "primary_sku", "denumire_db"]].copy()
+    except Exception as e:
+        st.error(f"❌ Eroare la citire v_sku_mapping: {e}")
+        return pd.DataFrame(columns=["sku_any", "primary_sku", "denumire_db"])
+    finally:
+        conn.close()
 
 def read_any_apex(file) -> pd.DataFrame:
     """Citește APEX (xlsx/xls/csv). Dacă e Excel, procesează TOATE foile."""
@@ -293,38 +328,52 @@ def save_apex_normalized_to_db(df: pd.DataFrame):
     Salvează datele APEX normalizate în tabelul apex_normalized.
     Șterge toate datele existente înainte de salvare.
     """
+    conn = get_db_connection()
+    if not conn:
+        st.error("❌ Nu pot salva - lipsește conexiunea DB")
+        return False
+
     try:
-        # 1. Șterge toate datele existente
-        delete_resp = client.table("apex_normalized").delete().neq("id", 0).execute()
-        st.info(f"🗑️ Șterse {len(delete_resp.data) if delete_resp.data else 'toate'} înregistrări vechi din apex_normalized")
+        cursor = conn.cursor()
 
-        # 2. Pregătește datele pentru insert
-        records = []
+        # 1. Șterge datele existente
+        cursor.execute("DELETE FROM apex_normalized;")
+        deleted_count = cursor.rowcount
+        st.info(f"🗑️ Șterse {deleted_count} înregistrări vechi din apex_normalized")
+
+        # 2. Insert datele noi
+        insert_query = """
+        INSERT INTO apex_normalized 
+            (cod_raw, cod, nume_apex, cantitate, pret_eur, pret_lei, order_hint, import_timestamp)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """
+
+        insert_data = []
         for _, row in df.iterrows():
-            record = {
-                "cod_raw": str(row.get("cod_raw", "")),
-                "cod": str(row.get("cod", "")),
-                "nume_apex": str(row.get("nume_apex", "")),
-                "cantitate": str(row.get("cantitate", "")),
-                "pret_eur": float(parse_decimal_maybe(row.get("pret_eur", 0))),
-                "pret_lei": float(parse_decimal_maybe(row.get("pret_lei", 0))),
-                "order_hint": str(row.get("order_hint", "")),
-                "import_timestamp": datetime.now().isoformat()
-            }
-            records.append(record)
+            insert_data.append((
+                str(row.get("cod_raw", "")),
+                str(row.get("cod", "")),
+                str(row.get("nume_apex", "")),
+                str(row.get("cantitate", "")),
+                float(parse_decimal_maybe(row.get("pret_eur", 0))),
+                float(parse_decimal_maybe(row.get("pret_lei", 0))),
+                str(row.get("order_hint", "")),
+                datetime.now()
+            ))
 
-        # 3. Insert în batch-uri de 500
-        batch_size = 500
-        total_inserted = 0
-        for i in range(0, len(records), batch_size):
-            batch = records[i:i+batch_size]
-            insert_resp = client.table("apex_normalized").insert(batch).execute()
-            total_inserted += len(batch)
+        cursor.executemany(insert_query, insert_data)
+        conn.commit()
 
-        st.success(f"✅ Salvate {total_inserted} înregistrări noi în apex_normalized")
+        st.success(f"✅ Salvate {len(insert_data)} înregistrări noi în apex_normalized")
+
+        cursor.close()
+        conn.close()
         return True
     except Exception as e:
         st.error(f"❌ Eroare la salvare în BD: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
         return False
 
 # =========================
@@ -374,7 +423,7 @@ if apex_df_normalized is not None and smartbill_file:
 
     # 0) Mapping din DB
     try:
-        df_map = load_sku_mapping_from_supabase()
+        df_map = load_sku_mapping_from_db()
     except Exception as e:
         st.error(f"Nu am putut citi v_sku_mapping: {e}")
         st.stop()

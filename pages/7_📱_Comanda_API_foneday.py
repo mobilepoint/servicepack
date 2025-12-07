@@ -71,18 +71,33 @@ def log_event(event_type: str, message: str, sku: str = None,
 # ===== FUNCȚII CALCUL PROFIT =====
 def calculate_profit_margin(foneday_price_eur: float, woo_price_ron: float) -> float:
     """Calculează marja de profit în procente"""
-    cost_ron = foneday_price_eur * EUR_RON_RATE
-    selling_price_without_vat = woo_price_ron / TVA_RATE
-    ratio = cost_ron / selling_price_without_vat
-    profit_margin = (1 - ratio) * 100
-    return round(profit_margin, 2)
+    try:
+        # Conversie explicit la float
+        foneday_price_eur = float(foneday_price_eur)
+        woo_price_ron = float(woo_price_ron)
+        
+        cost_ron = foneday_price_eur * EUR_RON_RATE
+        selling_price_without_vat = woo_price_ron / TVA_RATE
+        ratio = cost_ron / selling_price_without_vat
+        profit_margin = (1 - ratio) * 100
+        return round(profit_margin, 2)
+    except (ValueError, TypeError, ZeroDivisionError):
+        return 0.0
 
 def is_profitable(foneday_price_eur: float, woo_price_ron: float) -> bool:
     """Verifică dacă produsul e profitabil"""
-    cost_ron = foneday_price_eur * EUR_RON_RATE
-    selling_price_without_vat = woo_price_ron / TVA_RATE
-    ratio = cost_ron / selling_price_without_vat
-    return ratio < MIN_PROFIT_MARGIN
+    try:
+        # Conversie explicit la float
+        foneday_price_eur = float(foneday_price_eur)
+        woo_price_ron = float(woo_price_ron)
+        
+        cost_ron = foneday_price_eur * EUR_RON_RATE
+        selling_price_without_vat = woo_price_ron / TVA_RATE
+        ratio = cost_ron / selling_price_without_vat
+        return ratio < MIN_PROFIT_MARGIN
+    except (ValueError, TypeError, ZeroDivisionError):
+        return False
+
 
 # ===== FUNCȚII API FONEDAY =====
 @st.cache_data(ttl=300)
@@ -751,6 +766,16 @@ def step4_add_to_cart():
             status_container.info(f"🛒 PASUL 4: Verific {idx+1}/{len(available_products)}: {my_sku}")
             progress_bar.progress((idx + 1) / len(available_products))
             
+            # CONVERSIE EXPLICIT LA FLOAT
+            try:
+                foneday_price_float = float(foneday_price) if foneday_price else 0
+            except (ValueError, TypeError):
+                foneday_price_float = 0
+            
+            if foneday_price_float <= 0:
+                missing_price += 1
+                continue
+            
             # Obține prețul de vânzare din WooCommerce
             cursor.execute("""
                 SELECT regular_price FROM v_woo_prices WHERE sku = %s
@@ -761,18 +786,19 @@ def step4_add_to_cart():
                 missing_price += 1
                 continue
             
-            woo_price = float(price_result[0])
+            # CONVERSIE EXPLICIT LA FLOAT
+            try:
+                woo_price_float = float(price_result[0])
+            except (ValueError, TypeError):
+                woo_price_float = 0
             
-            if woo_price <= 0 or foneday_price <= 0:
+            if woo_price_float <= 0:
+                missing_price += 1
                 continue
             
             # Calculează profitabilitate
-            # Cost (RON) = Preț Foneday (EUR) × Curs
-            # Preț vânzare fără TVA = Preț WooCommerce / 1.21
-            # Profitabil dacă: Cost / Preț vânzare < MIN_PROFIT_MARGIN (0.88 = 12% profit)
-            
-            if is_profitable(foneday_price, woo_price):
-                profit_margin = calculate_profit_margin(foneday_price, woo_price)
+            if is_profitable(foneday_price_float, woo_price_float):
+                profit_margin = calculate_profit_margin(foneday_price_float, woo_price_float)
                 
                 # Adaugă în coșul Foneday prin API (2 bucăți)
                 cart_result = add_to_foneday_cart(foneday_sku, 2, f"Auto-import - {my_sku}")
@@ -790,8 +816,8 @@ def step4_add_to_cart():
                             my_sku,
                             foneday_sku,
                             2,
-                            foneday_price,
-                            woo_price,
+                            foneday_price_float,
+                            woo_price_float,
                             profit_margin,
                             True,
                             'added_to_cart',
@@ -803,6 +829,8 @@ def step4_add_to_cart():
                     except Exception as e:
                         conn.rollback()
                         log_event("step4_error", f"Eroare salvare coș {my_sku}: {e}", status="error")
+                else:
+                    log_event("step4_warning", f"Nu s-a putut adăuga în coș: {my_sku}", sku=my_sku, status="warning")
             else:
                 not_profitable += 1
             
@@ -819,8 +847,8 @@ def step4_add_to_cart():
         st.success(f"""
         ✅ **PASUL 4 FINALIZAT:**
         - 🛒 **{added_to_cart} produse** adăugate în coșul Foneday (2 buc fiecare)
-        - ❌ **{not_profitable} produse** neprofitabile (marjă < 12%)
-        - ⚠️ **{missing_price} produse** fără preț WooCommerce (actualizează din Pagina 1)
+        - ❌ **{not_profitable} produse** neprofitabile (marjă < {(1-MIN_PROFIT_MARGIN)*100:.0f}%)
+        - ⚠️ **{missing_price} produse** fără preț valid (actualizează din Pagina 1)
         - 💡 Parametri profit: EUR/RON = {EUR_RON_RATE}, TVA = {TVA_RATE}, Marjă min = {(1-MIN_PROFIT_MARGIN)*100:.0f}%
         """)
         
@@ -829,132 +857,16 @@ def step4_add_to_cart():
         error_msg = f"Eroare PASUL 4: {e}"
         st.error(f"❌ {error_msg}")
         log_event("step4_error", error_msg, status="error")
+        
+        # Debug traceback
+        import traceback
+        st.code(traceback.format_exc())
+        
         return 0, 0
     finally:
         if conn:
             conn.close()
 
-# ============ FUNCȚIE: Căutare Oportunități Profit ============
-def find_high_profit_opportunities(min_profit_percent: float):
-    """Caută produse cu marjă de profit mare (DOAR cu stoc ≥ 1)"""
-    progress_bar = st.progress(0)
-    status_container = st.empty()
-    
-    status_container.info("💰 Caut oportunități de profit mare (produse CU stoc)...")
-    log_event("opportunities_start", f"Căutare oportunități profit ≥{min_profit_percent}%", status="info")
-    
-    opportunities = []
-    conn = None
-    
-    try:
-        conn = get_db_connection()
-        if not conn:
-            st.error("❌ Nu pot conecta la baza de date")
-            return []
-        
-        cursor = conn.cursor()
-        
-        # Găsește toate mapările
-        cursor.execute("""
-            SELECT m.my_sku, m.foneday_sku, m.product_id
-            FROM public.sku_artcode_mapping m
-        """)
-        mappings = cursor.fetchall()
-        
-        if not mappings:
-            st.warning("Nu există mapări. Rulează mai întâi PASUL 2.")
-            cursor.close()
-            return []
-        
-        total_mappings = len(mappings)
-        
-        for idx, (my_sku, foneday_sku, product_id) in enumerate(mappings):
-            status_container.info(f"💰 Verific {idx+1}/{total_mappings}: {my_sku}")
-            progress_bar.progress((idx + 1) / total_mappings)
-            
-            # Verifică stoc WooCommerce
-            cursor.execute("""
-                SELECT stock_quantity FROM v_woo_stock WHERE sku = %s
-            """, (my_sku,))
-            stock_result = cursor.fetchone()
-            
-            if not stock_result:
-                continue
-            
-            current_stock = stock_result[0] if stock_result[0] is not None else 0
-            
-            # Doar produse CU stoc (nu căutăm reaprovizionare, căutăm oportunități)
-            if current_stock <= 0:
-                continue
-            
-            # Verifică preț WooCommerce
-            cursor.execute("""
-                SELECT regular_price FROM v_woo_prices WHERE sku = %s
-            """, (my_sku,))
-            price_result = cursor.fetchone()
-            
-            if not price_result:
-                continue
-            
-            woo_price = float(price_result[0]) if price_result[0] else 0
-            
-            if woo_price <= 0:
-                continue
-            
-            # Verifică disponibilitate și preț Foneday LIVE
-            foneday_product = get_foneday_product_by_sku(foneday_sku)
-            
-            if foneday_product and foneday_product.get("instock") == "Y":
-                foneday_price = float(foneday_product.get("price", 0))
-                
-                if foneday_price > 0:
-                    profit_margin = calculate_profit_margin(foneday_price, woo_price)
-                    
-                    # Dacă marja >= marja cerută
-                    if profit_margin >= min_profit_percent:
-                        # Obține nume produs
-                        cursor.execute("""
-                            SELECT name FROM v_product WHERE id = %s
-                        """, (product_id,))
-                        product_result = cursor.fetchone()
-                        product_name = product_result[0] if product_result else my_sku
-                        
-                        opportunities.append({
-                            "sku": my_sku,
-                            "product_name": product_name,
-                            "foneday_sku": foneday_sku,
-                            "woo_price_ron": woo_price,
-                            "foneday_price_eur": foneday_price,
-                            "profit_margin": profit_margin,
-                            "current_stock": current_stock,
-                            "foneday_title": foneday_product.get("title"),
-                            "quality": foneday_product.get("quality")
-                        })
-                        
-                        log_event("opportunity_found", 
-                                f"Oportunitate: {my_sku} - Stoc: {current_stock} - Profit: {profit_margin}%", 
-                                sku=my_sku, status="success")
-            
-            if idx % 10 == 0:
-                time.sleep(0.2)
-        
-        cursor.close()
-        
-        progress_bar.progress(1.0)
-        status_container.empty()
-        
-        log_event("opportunities_complete", 
-                f"Găsite {len(opportunities)} oportunități cu profit ≥{min_profit_percent}%", 
-                status="success")
-        
-        return opportunities
-    except Exception as e:
-        st.error(f"❌ Eroare căutare oportunități: {e}")
-        log_event("opportunities_error", f"Eroare: {e}", status="error")
-        return []
-    finally:
-        if conn:
-            conn.close()
 
 # ===== SIDEBAR =====
 st.sidebar.title("📱 Comanda API Foneday")

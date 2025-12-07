@@ -2,7 +2,6 @@ import streamlit as st
 import psycopg2
 from datetime import datetime
 import requests
-import base64
 
 # ===== FUNCȚIE VERIFICARE CONEXIUNI =====
 @st.cache_resource
@@ -12,10 +11,9 @@ def check_all_connections():
         "postgresql": {"status": False},
         "woocommerce": {"status": False},
         "smartbill": {"status": False},
-        "foneday": {"status": False},
-        "emag": {"status": False}
+        "foneday": {"status": False}
     }
-
+    
     # 1. VERIFICARE POSTGRESQL
     try:
         pg_url = st.secrets["connections"]["postgresql"]["url"]
@@ -27,14 +25,14 @@ def check_all_connections():
         results["postgresql"]["status"] = True
     except:
         pass
-
+    
     # 2. VERIFICARE WOOCOMMERCE API
     try:
         from woocommerce import API
         woo_url = st.secrets["connections"]["woocommerce"]["WOO_URL"]
         woo_key = st.secrets["connections"]["woocommerce"]["WOO_CONSUMER_KEY"]
         woo_secret = st.secrets["connections"]["woocommerce"]["WOO_CONSUMER_SECRET"]
-
+        
         wcapi = API(
             url=woo_url,
             consumer_key=woo_key,
@@ -42,82 +40,51 @@ def check_all_connections():
             version="wc/v3",
             timeout=15
         )
-
+        
         response = wcapi.get("products", params={"per_page": 1})
         if response.status_code in range(200, 300):
             results["woocommerce"]["status"] = True
     except:
         pass
-
+    
     # 3. VERIFICARE SMARTBILL API
     try:
         from requests.auth import HTTPBasicAuth
         sb_email = st.secrets["connections"]["smartbill"]["EMAIL"]
         sb_token = st.secrets["connections"]["smartbill"]["TOKEN"]
         sb_cif = st.secrets["connections"]["smartbill"]["CIF"]
-
+        
         url = "https://ws.smartbill.ro/SBORO/api/tax"
         auth = HTTPBasicAuth(sb_email, sb_token)
         headers = {"Accept": "application/json", "Content-Type": "application/json"}
-
+        
         response = requests.get(url, auth=auth, headers=headers, params={"cif": sb_cif}, timeout=10)
         if response.status_code == 200:
             results["smartbill"]["status"] = True
     except:
         pass
-
+    
     # 4. VERIFICARE FONEDAY API
     try:
         foneday_api_url = st.secrets["connections"]["foneday"]["API_URL"]
         foneday_api_token = st.secrets["connections"]["foneday"]["API_TOKEN"]
-
+        
         headers = {
             "Authorization": f"Bearer {foneday_api_token}",
             "Content-Type": "application/json"
         }
-
+        
         response = requests.get(
             f"{foneday_api_url}/products",
             headers=headers,
             timeout=10
         )
-
+        
         if response.status_code in range(200, 300):
             results["foneday"]["status"] = True
     except:
         pass
-
-    # 5. VERIFICARE EMAG API
-    try:
-        emag_username = st.secrets["connections"]["emag"]["USERNAME"]
-        emag_password = st.secrets["connections"]["emag"]["PASSWORD"]
-        emag_api_url = st.secrets["connections"]["emag"]["API_URL"]
-
-        # Creare Basic Auth header
-        credentials = f"{emag_username}:{emag_password}"
-        encoded_credentials = base64.b64encode(credentials.encode()).decode()
-
-        headers = {
-            "Authorization": f"Basic {encoded_credentials}",
-            "Content-Type": "application/json"
-        }
-
-        # Test conexiune cu endpoint /vat/read
-        response = requests.post(
-            f"{emag_api_url}/vat/read",
-            headers=headers,
-            json={"data": {}},
-            timeout=15
-        )
-
-        if response.status_code == 200:
-            data = response.json()
-            # Verifică că nu e eroare în response
-            if not data.get("isError", True):
-                results["emag"]["status"] = True
-    except:
-        pass
-
+    
     return results
 
 # ===== FUNCȚIE PENTRU A OBȚINE PRODUS FONEDAY =====
@@ -129,13 +96,13 @@ def get_foneday_product_by_sku(foneday_sku: str):
             "Authorization": f"Bearer {st.secrets['connections']['foneday']['API_TOKEN']}",
             "Content-Type": "application/json"
         }
-
+        
         response = requests.get(
             f"{st.secrets['connections']['foneday']['API_URL']}/product/{foneday_sku}",
             headers=headers,
             timeout=10
         )
-
+        
         if response.status_code == 200:
             data = response.json()
             return data.get("product")
@@ -173,16 +140,16 @@ def check_table_timestamps():
             "column": "updated_at"
         }
     }
-
+    
     try:
         pg_url = st.secrets["connections"]["postgresql"]["url"]
         conn = psycopg2.connect(pg_url, connect_timeout=10)
         cursor = conn.cursor()
-
+        
         for table_key, table_config in tables.items():
             try:
                 timestamp_column = table_config["column"]
-
+                
                 cursor.execute(f"""
                     SELECT EXISTS (
                         SELECT FROM information_schema.columns 
@@ -191,18 +158,16 @@ def check_table_timestamps():
                         AND column_name = '{timestamp_column}'
                     );
                 """)
-
                 exists = cursor.fetchone()[0]
-
+                
                 if exists:
                     cursor.execute(f"""
-                        SELECT MAX({timestamp_column}) 
+                        SELECT MAX({timestamp_column})
                         FROM public.{table_key};
                     """)
-
                     result = cursor.fetchone()
                     max_ts = result[0] if result else None
-
+                    
                     if max_ts:
                         tables[table_key]["ts"] = max_ts
                         tables[table_key]["status"] = "✓"
@@ -215,14 +180,14 @@ def check_table_timestamps():
             except:
                 tables[table_key]["status"] = "✗"
                 tables[table_key]["ts"] = "Eroare"
-
+        
         cursor.close()
         conn.close()
     except:
         for table_key in tables.keys():
             tables[table_key]["status"] = "✗"
             tables[table_key]["ts"] = "DB offline"
-
+    
     return tables
 
 # ===== FUNCȚIE PENTRU AFIȘARE SIDEBAR =====
@@ -231,51 +196,42 @@ def render_sidebar():
     with st.sidebar:
         # === CONEXIUNI API ===
         st.markdown("### 🔌 Conexiuni API")
-
         conn_status = check_all_connections()
-
+        
         # PostgreSQL
         col1, col2 = st.columns([3, 1])
         with col1:
             st.caption("PostgreSQL")
         with col2:
             st.markdown("✅" if conn_status["postgresql"]["status"] else "❌")
-
+        
         # WooCommerce
         col1, col2 = st.columns([3, 1])
         with col1:
             st.caption("WooCommerce")
         with col2:
             st.markdown("✅" if conn_status["woocommerce"]["status"] else "❌")
-
+        
         # SmartBill
         col1, col2 = st.columns([3, 1])
         with col1:
             st.caption("SmartBill")
         with col2:
             st.markdown("✅" if conn_status["smartbill"]["status"] else "❌")
-
+        
         # FoneDay
         col1, col2 = st.columns([3, 1])
         with col1:
             st.caption("📱 FoneDay")
         with col2:
             st.markdown("✅" if conn_status["foneday"]["status"] else "❌")
-
-        # eMAG
-        col1, col2 = st.columns([3, 1])
-        with col1:
-            st.caption("🛍️ eMAG")
-        with col2:
-            st.markdown("✅" if conn_status["emag"]["status"] else "❌")
-
+        
         st.divider()
-
+        
         # === ULTIMA ACTUALIZARE TABELE ===
         st.markdown("### 📊 Ultima Actualizare")
-
         tables = check_table_timestamps()
-
+        
         for table_key, table_info in tables.items():
             col1, col2 = st.columns([1, 5])
             with col1:
@@ -297,13 +253,13 @@ def render_sidebar():
                             st.caption(f"🕐 {table_info['ts']}")
                 else:
                     st.caption(f"🕐 {table_info['ts'] if table_info['ts'] else 'N/A'}")
-
+        
         st.divider()
-
+        
         # === BUTON REFRESH ===
         if st.button("🔄 Actualizează", use_container_width=True, type="secondary"):
             st.cache_resource.clear()
             st.cache_data.clear()
             st.rerun()
-
+        
         st.caption(f"Verificat: {datetime.now().strftime('%H:%M:%S')}")

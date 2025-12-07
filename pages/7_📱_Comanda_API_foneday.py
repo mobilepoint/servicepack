@@ -432,7 +432,6 @@ def step2_map_sku_to_artcode():
             artcode_to_foneday[artcode].append(foneday_sku)
         
         # Grupează SKU-uri pe PRODUS (product_id = UUID)
-        # product_id -> {"primary_sku": ..., "all_skus": [...], "is_primary": ...}
         products_dict = {}
         
         for sku, product_id, is_primary in all_skus:
@@ -440,16 +439,14 @@ def step2_map_sku_to_artcode():
                 products_dict[product_id] = {
                     "primary_sku": None,
                     "all_skus": [],
-                    "matching_skus": []  # SKU-uri care au match în Foneday
+                    "matching_skus": []
                 }
             
             products_dict[product_id]["all_skus"].append(sku)
             
-            # Setează SKU-ul primar
             if is_primary:
                 products_dict[product_id]["primary_sku"] = sku
             
-            # Verifică dacă SKU-ul match-uiește cu Foneday
             if sku in artcode_to_foneday:
                 products_dict[product_id]["matching_skus"].append({
                     "sku": sku,
@@ -458,67 +455,61 @@ def step2_map_sku_to_artcode():
                 })
         
         # Creează mapări la nivel de PRODUS
-        # Regula: pentru fiecare produs, alege UN SINGUR SKU pentru mapare
-        # Prioritate: SKU primar care match-uiește, altfel primul SKU care match-uiește
-        
-        batch_mappings = []
+        # Folosește DICT cu cheia unică (my_sku, foneday_artcode) pentru a evita duplicate
+        mappings_dict = {}
         products_mapped = 0
-        total_foneday_matches = 0
-        skipped_no_primary = 0
         
         for product_id, product_data in products_dict.items():
             matching_skus = product_data["matching_skus"]
             
             if not matching_skus:
-                # Produsul nu are niciun SKU care match-uiește cu Foneday
                 continue
             
             # Alege SKU-ul de folosit pentru mapare
-            # Prioritate 1: SKU-ul PRIMAR care match-uiește
             primary_match = next((m for m in matching_skus if m["is_primary"]), None)
             
             if primary_match:
                 selected_sku = primary_match["sku"]
                 selected_foneday_skus = primary_match["foneday_skus"]
             else:
-                # Prioritate 2: primul SKU care match-uiește
                 selected_sku = matching_skus[0]["sku"]
                 selected_foneday_skus = matching_skus[0]["foneday_skus"]
             
-            # Dacă nu există SKU primar deloc pentru produs, folosește SKU-ul selectat
-            if not product_data["primary_sku"]:
-                product_data["primary_sku"] = selected_sku
+            # IMPORTANT: Cheia unică în tabel este (my_sku, foneday_artcode)
+            # Dacă același SKU match-uiește cu mai multe foneday_sku, alege PRIMUL
+            key = (selected_sku, selected_sku)  # (my_sku, foneday_artcode)
             
-            # Creează mapări pentru fiecare foneday_sku găsit
-            for foneday_sku in selected_foneday_skus:
-                batch_mappings.append((
-                    selected_sku,        # SKU-ul ales (primar sau primul match)
-                    selected_sku,        # foneday_artcode (același cu SKU-ul)
-                    foneday_sku,         # SKU-ul produsului în Foneday
-                    product_id,          # UUID-ul produsului
-                    100,                 # mapping_score
-                    datetime.now()
-                ))
-                total_foneday_matches += 1
-            
-            products_mapped += 1
+            if key not in mappings_dict:
+                # Ia primul foneday_sku din listă
+                mappings_dict[key] = {
+                    "foneday_sku": selected_foneday_skus[0],  # PRIMUL match
+                    "product_id": product_id
+                }
+                products_mapped += 1
+        
+        # Convertește dict în listă de tuple pentru batch insert
+        batch_mappings = []
+        for (my_sku, foneday_artcode), data in mappings_dict.items():
+            batch_mappings.append((
+                my_sku,
+                foneday_artcode,
+                data["foneday_sku"],
+                data["product_id"],
+                100,
+                datetime.now()
+            ))
         
         status_container.success(f"""
         ✅ Mapare completă la nivel de PRODUS:
         - {products_mapped} produse UNICE mapate
-        - {total_foneday_matches} legături către produse Foneday
+        - {len(batch_mappings)} mapări create (fără duplicate)
         - {len(products_dict) - products_mapped} produse fără match în Foneday
         """)
-        log_event("step2_process", f"{products_mapped} produse mapate cu {total_foneday_matches} legături Foneday", status="info")
+        log_event("step2_process", f"{products_mapped} produse mapate", status="info")
         progress_bar.progress(0.8)
         
         if not batch_mappings:
             st.warning("⚠️ Nu s-au găsit match-uri între produsele tale și Foneday!")
-            st.info("""
-            **Posibile cauze:**
-            - SKU-urile tale nu apar în câmpul `artcode` din produsele Foneday
-            - Rulează PASUL 1 pentru a actualiza catalogul Foneday
-            """)
             log_event("step2_warning", "Nu s-au găsit match-uri", status="warning")
             cursor.close()
             return 0
@@ -570,13 +561,14 @@ def step2_map_sku_to_artcode():
         ✅ **PASUL 2 FINALIZAT - Mapare la nivel de PRODUS:**
         
         - 🎯 **{products_mapped} produse UNICE** au corespondent în Foneday
-        - 🔗 **{total_saved} mapări** create (un produs poate avea mai multe opțiuni Foneday)
+        - 🔗 **{total_saved} mapări** salvate cu succes
         - 📊 **{unique_products_db} produse unice** în baza de date
-        - 💡 **Fără duplicate** - fiecare produs e mapat o singură dată, indiferent de câte sinonime SKU are
+        - 💡 **Fără duplicate** - fiecare produs e mapat o singură dată
         
         **Detalii:**
         - Prioritate SKU primar când există match
-        - Un produs = o singură intrare în coș (chiar dacă are mai multe SKU-uri)
+        - Un produs = o singură mapare în tabel
+        - Dacă un SKU match-uiește cu mai multe produse Foneday, se alege primul
         - Gata pentru PASUL 3 (verificare stoc zero)
         """)
         
@@ -589,6 +581,7 @@ def step2_map_sku_to_artcode():
     finally:
         if conn:
             conn.close()
+
 
 
 

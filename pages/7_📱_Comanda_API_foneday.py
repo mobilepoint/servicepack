@@ -40,7 +40,7 @@ except Exception as e:
 
 # ===== FUNCȚII DATABASE =====
 def get_db_connection():
-    """Conexiune la PostgreSQL (fără cache pentru a evita 'connection closed')"""
+    """Conexiune la PostgreSQL"""
     try:
         conn = psycopg2.connect(PG_URL, connect_timeout=10)
         return conn
@@ -234,9 +234,17 @@ def step1_import_foneday_all_products():
                     foneday_sku = product.get("sku")
                     artcode_raw = product.get("artcode")
                     
+                    # Salvează artcode-ul RAW în foneday_products (pentru referință)
+                    artcode_for_db = None
+                    if artcode_raw:
+                        if isinstance(artcode_raw, (list, dict)):
+                            artcode_for_db = json.dumps(artcode_raw)
+                        else:
+                            artcode_for_db = str(artcode_raw)
+                    
                     batch_data.append((
                         foneday_sku,
-                        json.dumps(artcode_raw) if isinstance(artcode_raw, (list, dict)) else str(artcode_raw) if artcode_raw else None,
+                        artcode_for_db,
                         product.get("ean"),
                         product.get("title"),
                         product.get("instock"),
@@ -250,27 +258,45 @@ def step1_import_foneday_all_products():
                         datetime.now()
                     ))
                     
-                    # Normalizează artcodes
+                    # NORMALIZARE ARTCODES - extrage fiecare artcode individual
                     if artcode_raw:
                         artcodes_list = []
-                        if isinstance(artcode_raw, str):
-                            try:
-                                artcodes_list = json.loads(artcode_raw)
-                            except:
-                                artcodes_list = [artcode_raw.strip()]
-                        elif isinstance(artcode_raw, list):
+                        
+                        # Cazul 1: artcode_raw este deja o listă Python
+                        if isinstance(artcode_raw, list):
                             artcodes_list = artcode_raw
+                        # Cazul 2: artcode_raw este un string care poate fi JSON
+                        elif isinstance(artcode_raw, str):
+                            # Încearcă să parseze ca JSON
+                            try:
+                                parsed = json.loads(artcode_raw)
+                                if isinstance(parsed, list):
+                                    artcodes_list = parsed
+                                else:
+                                    artcodes_list = [str(parsed)]
+                            except (json.JSONDecodeError, ValueError):
+                                # Nu e JSON valid, tratează-l ca string simplu
+                                artcodes_list = [artcode_raw.strip()]
+                        # Cazul 3: altceva (număr, dict, etc.)
                         else:
                             artcodes_list = [str(artcode_raw)]
                         
+                        # Curăță și adaugă fiecare artcode
                         for artcode_value in artcodes_list:
-                            artcode_clean = str(artcode_value).strip().strip('"').strip("'")
-                            if artcode_clean:
+                            # Convertește la string și curăță
+                            artcode_clean = str(artcode_value).strip()
+                            # Elimină ghilimele din exterior (dacă există)
+                            artcode_clean = artcode_clean.strip('"').strip("'")
+                            
+                            # Adaugă doar dacă nu e gol
+                            if artcode_clean and artcode_clean != "null" and artcode_clean != "None":
                                 batch_artcodes.append((foneday_sku, artcode_clean))
+                    
                 except Exception as e:
-                    log_event("step1_error", f"Eroare procesare produs Foneday: {e}", status="error")
+                    log_event("step1_error", f"Eroare procesare produs {foneday_sku}: {e}", status="error")
                     continue
             
+            # Salvează produsele în batch
             if batch_data:
                 try:
                     execute_values(cursor, """
@@ -298,6 +324,7 @@ def step1_import_foneday_all_products():
                     log_event("step1_error", f"Eroare salvare produse: {e}", status="error")
                     conn.rollback()
             
+            # Salvează artcodes-urile normalizate în batch
             if batch_artcodes:
                 try:
                     execute_values(cursor, """
@@ -312,7 +339,7 @@ def step1_import_foneday_all_products():
                     conn.rollback()
             
             status_container.info(f"💾 Salvate {total_saved}/{len(products)} produse, {total_artcodes_normalized} artcodes...")
-            progress_bar.progress(total_saved / len(products))
+            progress_bar.progress(min(total_saved / len(products), 0.99))
         
         cursor.close()
         
@@ -324,8 +351,9 @@ def step1_import_foneday_all_products():
         
         st.success(f"""
         ✅ **PASUL 1 FINALIZAT:**
-        - 📦 {total_saved} produse Foneday salvate
-        - 🔗 {total_artcodes_normalized} artcodes normalizate
+        - 📦 **{total_saved} produse Foneday** salvate în `foneday_products`
+        - 🔗 **{total_artcodes_normalized} artcodes** extrase și normalizate în `foneday_artcodes_normalized`
+        - 💡 Artcode = SKU-ul tău din catalogul Foneday
         """)
         
         return total_saved
@@ -340,11 +368,11 @@ def step1_import_foneday_all_products():
 
 # ============ PASUL 2: Mapare SKU ============
 def step2_map_sku_to_artcode():
-    """PASUL 2: Mapare SKU-uri optimizată"""
+    """PASUL 2: Mapare SKU-uri - compară SKU-urile tale cu artcodes Foneday"""
     progress_bar = st.progress(0)
     status_container = st.empty()
     
-    log_event("step2_start", "PASUL 2: Începe mapare SKU → artcode", status="info")
+    log_event("step2_start", "PASUL 2: Începe mapare SKU → Foneday", status="info")
     
     conn = None
     try:
@@ -355,9 +383,9 @@ def step2_map_sku_to_artcode():
         
         cursor = conn.cursor()
         
-        status_container.info("📂 PASUL 2: Citesc toate SKU-urile din catalog...")
+        status_container.info("📂 PASUL 2: Citesc SKU-urile din catalogul tău...")
         
-        # Citește toate SKU-urile primare
+        # Citește toate SKU-urile primare din catalogul tău
         cursor.execute("""
             SELECT sku, product_id 
             FROM v_product_sku 
@@ -366,18 +394,18 @@ def step2_map_sku_to_artcode():
         all_my_skus = cursor.fetchall()
         
         if not all_my_skus:
-            st.warning("Nu există SKU-uri de mapat")
+            st.warning("Nu există SKU-uri în catalogul tău")
             log_event("step2_warning", "Nu există SKU-uri de mapat", status="warning")
             cursor.close()
             return 0
         
-        status_container.success(f"✅ Total {len(all_my_skus)} SKU-uri în catalog")
+        status_container.success(f"✅ Total {len(all_my_skus)} SKU-uri în catalogul tău")
         log_event("step2_process", f"Procesez {len(all_my_skus)} SKU-uri", status="info")
         progress_bar.progress(0.3)
         
-        status_container.info("📂 Citesc toate artcode-urile Foneday...")
+        status_container.info("📂 Citesc artcode-urile din Foneday...")
         
-        # Citește toate artcode-urile
+        # Citește toate artcode-urile normalizate din Foneday
         cursor.execute("""
             SELECT foneday_sku, artcode 
             FROM public.foneday_artcodes_normalized
@@ -385,50 +413,61 @@ def step2_map_sku_to_artcode():
         all_artcodes = cursor.fetchall()
         
         if not all_artcodes:
-            st.warning("Nu există artcode-uri Foneday")
+            st.warning("Nu există artcode-uri Foneday. Rulează mai întâi PASUL 1!")
             log_event("step2_warning", "Nu există artcode-uri Foneday", status="warning")
             cursor.close()
             return 0
         
-        status_container.success(f"✅ Total {len(all_artcodes)} artcode-uri Foneday")
+        status_container.success(f"✅ Total {len(all_artcodes)} artcode-uri din Foneday")
         log_event("step2_process", f"Procesez {len(all_artcodes)} artcodes", status="info")
         progress_bar.progress(0.6)
         
-        status_container.info("🔗 Creez mapări în memorie...")
+        status_container.info("🔗 Compar și creez mapări...")
         
-        # Creează dicționar pentru mapare rapidă
+        # Creează dicționar pentru mapare rapidă: artcode -> lista de foneday_sku
         artcode_dict = {}
         for foneday_sku, artcode in all_artcodes:
             if artcode not in artcode_dict:
                 artcode_dict[artcode] = []
             artcode_dict[artcode].append(foneday_sku)
         
+        # Compară SKU-urile tale cu artcodes Foneday
         batch_mappings = []
+        matches_count = 0
+        
         for my_sku, product_id in all_my_skus:
+            # Verifică dacă SKU-ul tău apare în artcodes Foneday
             if my_sku in artcode_dict:
+                matches_count += 1
+                # Poate exista mai mult de un produs Foneday cu același artcode
                 for foneday_sku in artcode_dict[my_sku]:
                     batch_mappings.append((
-                        my_sku,
-                        my_sku,  # foneday_artcode = my_sku
-                        foneday_sku,
-                        product_id,
-                        100,  # mapping_score
+                        my_sku,           # SKU-ul tău
+                        my_sku,           # foneday_artcode (același cu SKU-ul tău)
+                        foneday_sku,      # SKU-ul produsului în Foneday
+                        product_id,       # ID-ul produsului tău
+                        100,              # mapping_score (100 = match exact)
                         datetime.now()
                     ))
         
-        status_container.success(f"✅ Create {len(batch_mappings)} mapări în memorie")
-        log_event("step2_process", f"Create {len(batch_mappings)} mapări", status="info")
+        status_container.success(f"✅ Găsite {matches_count} SKU-uri cu match în Foneday ({len(batch_mappings)} mapări totale)")
+        log_event("step2_process", f"Create {len(batch_mappings)} mapări din {len(all_my_skus)} SKU-uri", status="info")
         progress_bar.progress(0.8)
         
         if not batch_mappings:
-            st.warning("Nu s-au găsit match-uri între SKU-uri și Foneday")
+            st.warning("⚠️ Nu s-au găsit match-uri între SKU-urile tale și Foneday!")
+            st.info("""
+            **Possible cauze:**
+            - SKU-urile tale nu apar în câmpul `artcode` din produsele Foneday
+            - Rulează PASUL 1 pentru a actualiza catalogul Foneday
+            """)
             log_event("step2_warning", "Nu s-au găsit match-uri", status="warning")
             cursor.close()
             return 0
         
-        status_container.info("💾 Salvez mapări...")
+        status_container.info("💾 Salvez mapări în baza de date...")
         
-        # Salvează batch-uri de mapări
+        # Salvează mapările în batch-uri
         batch_size = 500
         total_saved = 0
         
@@ -467,8 +506,10 @@ def step2_map_sku_to_artcode():
         
         st.success(f"""
         ✅ **PASUL 2 FINALIZAT:**
-        - 🔗 {total_saved} mapări procesate
-        - 📊 {total_in_db} mapări totale în DB
+        - 🔗 **{matches_count} SKU-uri** din catalogul tău au corespondent în Foneday
+        - 💾 **{total_saved} mapări** procesate și salvate
+        - 📊 **{total_in_db} mapări** totale în baza de date
+        - 💡 Acum poți căuta produse disponibile în Foneday (PASUL 3)
         """)
         
         return total_in_db
@@ -483,12 +524,12 @@ def step2_map_sku_to_artcode():
 
 # ============ PASUL 3: Verifică stoc ============
 def step3_check_stock_and_prices():
-    """PASUL 3: Verifică stoc și prețuri - produse cu stoc zero"""
+    """PASUL 3: Verifică disponibilitate Foneday pentru produsele cu stoc zero"""
     progress_bar = st.progress(0)
     status_container = st.empty()
     
-    log_event("step3_start", "PASUL 3: Verificare stoc și prețuri Foneday", status="info")
-    status_container.info("🔍 PASUL 3: Găsesc produse cu stoc zero...")
+    log_event("step3_start", "PASUL 3: Verificare disponibilitate Foneday", status="info")
+    status_container.info("🔍 PASUL 3: Găsesc produse cu stoc zero în WooCommerce...")
     
     conn = None
     try:
@@ -499,7 +540,7 @@ def step3_check_stock_and_prices():
         
         cursor = conn.cursor()
         
-        # Găsește produse cu stoc zero
+        # Găsește produse cu stoc zero din WooCommerce
         cursor.execute("""
             SELECT sku, product_id, woo_product_id
             FROM v_woo_stock
@@ -508,21 +549,23 @@ def step3_check_stock_and_prices():
         zero_stock_products = cursor.fetchall()
         
         if not zero_stock_products:
-            status_container.success("✅ Nu există produse cu stoc zero!")
+            status_container.success("✅ Nu există produse cu stoc zero în WooCommerce!")
             log_event("step3_complete", "Nu există produse cu stoc zero", status="success")
             cursor.close()
             return 0, 0
         
-        log_event("step3_process", f"Verificare {len(zero_stock_products)} produse cu stoc zero", status="info")
+        status_container.info(f"📦 Găsite {len(zero_stock_products)} produse cu stoc zero")
+        log_event("step3_process", f"Verificare {len(zero_stock_products)} produse", status="info")
         
         total_checked = 0
         total_available = 0
+        products_without_mapping = 0
         
         for idx, (my_sku, product_id, woo_product_id) in enumerate(zero_stock_products):
             status_container.info(f"🔍 PASUL 3: Verific {idx+1}/{len(zero_stock_products)}: {my_sku}")
             progress_bar.progress((idx + 1) / len(zero_stock_products))
             
-            # Găsește maparea Foneday
+            # Găsește maparea către Foneday (din PASUL 2)
             cursor.execute("""
                 SELECT foneday_sku FROM public.sku_artcode_mapping
                 WHERE my_sku = %s
@@ -530,18 +573,21 @@ def step3_check_stock_and_prices():
             mappings = cursor.fetchall()
             
             if not mappings:
+                products_without_mapping += 1
                 continue
             
+            # Verifică fiecare mapping (poate exista mai mult de unul)
             for (foneday_sku,) in mappings:
                 if not foneday_sku:
                     continue
                 
-                # Verifică disponibilitate la Foneday
+                # Verifică LIVE disponibilitate la Foneday prin API
                 foneday_product = get_foneday_product_by_sku(foneday_sku)
                 
                 if foneday_product:
                     total_checked += 1
                     
+                    # Dacă e în stoc la Foneday, salvează în inventar
                     if foneday_product.get("instock") == "Y":
                         total_available += 1
                         
@@ -567,24 +613,26 @@ def step3_check_stock_and_prices():
                                 datetime.now()
                             )])
                             conn.commit()
-                        except:
+                        except Exception as e:
                             conn.rollback()
-                            pass
+                            log_event("step3_error", f"Eroare salvare inventar {my_sku}: {e}", status="error")
                 
-                time.sleep(0.2)
+                time.sleep(0.2)  # Rate limiting API
         
         cursor.close()
         
         progress_bar.progress(1.0)
         status_container.empty()
         
-        success_msg = f"PASUL 3: {total_checked} verificate, {total_available} disponibile"
+        success_msg = f"PASUL 3: {total_checked} verificate, {total_available} disponibile, {products_without_mapping} fără mapping"
         log_event("step3_complete", success_msg, status="success")
         
         st.success(f"""
         ✅ **PASUL 3 FINALIZAT:**
-        - 🔍 {total_checked} produse verificate la Foneday
-        - ✅ {total_available} disponibile pentru comandă
+        - 🔍 **{total_checked} produse** verificate LIVE în API Foneday
+        - ✅ **{total_available} produse** disponibile pentru comandă
+        - ⚠️ **{products_without_mapping} produse** fără mapping (rulează PASUL 2 dacă lipsesc)
+        - 💾 Produsele disponibile sunt salvate în `foneday_inventory`
         """)
         
         return total_checked, total_available
@@ -599,7 +647,7 @@ def step3_check_stock_and_prices():
 
 # ============ PASUL 4: Adaugă în coș ============
 def step4_add_to_cart():
-    """PASUL 4: Adaugă în coș Foneday produsele profitabile (2 bucăți)"""
+    """PASUL 4: Calculează profitabilitate și adaugă produse în coșul Foneday"""
     progress_bar = st.progress(0)
     status_container = st.empty()
     
@@ -615,7 +663,7 @@ def step4_add_to_cart():
         
         cursor = conn.cursor()
         
-        # Găsește produse disponibile la Foneday
+        # Găsește produse disponibile la Foneday (din PASUL 3)
         cursor.execute("""
             SELECT product_id, sku, foneday_sku, price_eur
             FROM public.foneday_inventory
@@ -624,43 +672,51 @@ def step4_add_to_cart():
         available_products = cursor.fetchall()
         
         if not available_products:
-            status_container.info("Nu există produse disponibile la Foneday")
+            status_container.info("Nu există produse disponibile la Foneday. Rulează PASUL 3!")
             log_event("step4_complete", "Nu există produse disponibile", status="info")
             cursor.close()
             return 0, 0
         
+        status_container.info(f"💰 Analizez profitabilitatea pentru {len(available_products)} produse...")
         log_event("step4_process", f"Procesez {len(available_products)} produse disponibile", status="info")
         
         added_to_cart = 0
         not_profitable = 0
+        missing_price = 0
         
         for idx, (product_id, my_sku, foneday_sku, foneday_price) in enumerate(available_products):
             status_container.info(f"🛒 PASUL 4: Verific {idx+1}/{len(available_products)}: {my_sku}")
             progress_bar.progress((idx + 1) / len(available_products))
             
-            # Obține prețul WooCommerce
+            # Obține prețul de vânzare din WooCommerce
             cursor.execute("""
                 SELECT regular_price FROM v_woo_prices WHERE sku = %s
             """, (my_sku,))
             price_result = cursor.fetchone()
             
-            if not price_result:
+            if not price_result or not price_result[0]:
+                missing_price += 1
                 continue
             
-            woo_price = float(price_result[0]) if price_result[0] else 0
+            woo_price = float(price_result[0])
             
             if woo_price <= 0 or foneday_price <= 0:
                 continue
             
-            # Verifică profitabilitate
+            # Calculează profitabilitate
+            # Cost (RON) = Preț Foneday (EUR) × Curs
+            # Preț vânzare fără TVA = Preț WooCommerce / 1.21
+            # Profitabil dacă: Cost / Preț vânzare < MIN_PROFIT_MARGIN (0.88 = 12% profit)
+            
             if is_profitable(foneday_price, woo_price):
                 profit_margin = calculate_profit_margin(foneday_price, woo_price)
                 
-                # Adaugă în coș Foneday
+                # Adaugă în coșul Foneday prin API (2 bucăți)
                 cart_result = add_to_foneday_cart(foneday_sku, 2, f"Auto-import - {my_sku}")
                 
                 if cart_result:
                     try:
+                        # Salvează în baza de date locală
                         cursor.execute("""
                             INSERT INTO public.foneday_cart 
                             (product_id, sku, foneday_sku, quantity, price_eur, woo_price_ron, 
@@ -681,26 +737,28 @@ def step4_add_to_cart():
                         conn.commit()
                         added_to_cart += 1
                         log_event("step4_add", f"Adăugat: {my_sku} - Profit: {profit_margin}%", sku=my_sku, status="success")
-                    except:
+                    except Exception as e:
                         conn.rollback()
-                        pass
+                        log_event("step4_error", f"Eroare salvare coș {my_sku}: {e}", status="error")
             else:
                 not_profitable += 1
             
-            time.sleep(0.1)
+            time.sleep(0.1)  # Rate limiting API
         
         cursor.close()
         
         progress_bar.progress(1.0)
         status_container.empty()
         
-        success_msg = f"PASUL 4 complet: {added_to_cart} adăugate, {not_profitable} neprofitabile"
+        success_msg = f"PASUL 4: {added_to_cart} adăugate, {not_profitable} neprofitabile, {missing_price} fără preț"
         log_event("step4_complete", success_msg, status="success")
         
         st.success(f"""
         ✅ **PASUL 4 FINALIZAT:**
-        - 🛒 {added_to_cart} produse adăugate în coș
-        - ❌ {not_profitable} produse neprofitabile (excluse)
+        - 🛒 **{added_to_cart} produse** adăugate în coșul Foneday (2 buc fiecare)
+        - ❌ **{not_profitable} produse** neprofitabile (marjă < 12%)
+        - ⚠️ **{missing_price} produse** fără preț WooCommerce (actualizează din Pagina 1)
+        - 💡 Parametri profit: EUR/RON = {EUR_RON_RATE}, TVA = {TVA_RATE}, Marjă min = {(1-MIN_PROFIT_MARGIN)*100:.0f}%
         """)
         
         return added_to_cart, not_profitable
@@ -719,8 +777,8 @@ def find_high_profit_opportunities(min_profit_percent: float):
     progress_bar = st.progress(0)
     status_container = st.empty()
     
-    status_container.info("💰 Caut oportunități de profit mare (DOAR produse cu stoc)...")
-    log_event("opportunities_start", f"Căutare oportunități profit ≥{min_profit_percent}% (stoc ≥1)", status="info")
+    status_container.info("💰 Caut oportunități de profit mare (produse CU stoc)...")
+    log_event("opportunities_start", f"Căutare oportunități profit ≥{min_profit_percent}%", status="info")
     
     opportunities = []
     conn = None
@@ -751,7 +809,7 @@ def find_high_profit_opportunities(min_profit_percent: float):
             status_container.info(f"💰 Verific {idx+1}/{total_mappings}: {my_sku}")
             progress_bar.progress((idx + 1) / total_mappings)
             
-            # Verifică stoc
+            # Verifică stoc WooCommerce
             cursor.execute("""
                 SELECT stock_quantity FROM v_woo_stock WHERE sku = %s
             """, (my_sku,))
@@ -762,7 +820,7 @@ def find_high_profit_opportunities(min_profit_percent: float):
             
             current_stock = stock_result[0] if stock_result[0] is not None else 0
             
-            # Doar produse cu stoc
+            # Doar produse CU stoc (nu căutăm reaprovizionare, căutăm oportunități)
             if current_stock <= 0:
                 continue
             
@@ -780,7 +838,7 @@ def find_high_profit_opportunities(min_profit_percent: float):
             if woo_price <= 0:
                 continue
             
-            # Verifică disponibilitate Foneday
+            # Verifică disponibilitate și preț Foneday LIVE
             foneday_product = get_foneday_product_by_sku(foneday_sku)
             
             if foneday_product and foneday_product.get("instock") == "Y":
@@ -789,6 +847,7 @@ def find_high_profit_opportunities(min_profit_percent: float):
                 if foneday_price > 0:
                     profit_margin = calculate_profit_margin(foneday_price, woo_price)
                     
+                    # Dacă marja >= marja cerută
                     if profit_margin >= min_profit_percent:
                         # Obține nume produs
                         cursor.execute("""
@@ -822,7 +881,7 @@ def find_high_profit_opportunities(min_profit_percent: float):
         status_container.empty()
         
         log_event("opportunities_complete", 
-                f"Găsite {len(opportunities)} oportunități (stoc ≥1) cu profit ≥{min_profit_percent}%", 
+                f"Găsite {len(opportunities)} oportunități cu profit ≥{min_profit_percent}%", 
                 status="success")
         
         return opportunities
@@ -842,7 +901,7 @@ st.sidebar.markdown("---")
 # Warning pentru prețuri/stocuri
 st.sidebar.warning("""
 ⚠️ **IMPORTANT:**
-Asigură-te că ai rulat **Pagina 1** (Produse) pentru a actualiza prețurile și stocurile WooCommerce!
+Asigură-te că ai rulat **Pagina 1** pentru a actualiza prețurile și stocurile WooCommerce!
 """)
 
 page = st.sidebar.radio(
@@ -965,72 +1024,149 @@ elif page == "🔄 Import Individual (Pași)":
     st.title("🔄 Import Individual - Alege Pașii")
     
     with st.expander("📚 **CITEȘTE MAI ÎNTÂI - Ce Face Fiecare Pas**", expanded=False):
-        st.markdown("""
-        ### **Pasul 1: 🌐 Import Complet Catalog Foneday**
-        **Ce face:**
-        - Accesează `GET /products` din API Foneday
-        - Descarcă **TOATE produsele** disponibile
-        - Salvează în `foneday_products` și `foneday_artcodes_normalized`
+        st.markdown(f"""
+        ## 🔄 Fluxul Complet de Lucru
         
-        **Când:** **Săptămânal** (catalogul nu se schimbă zilnic)
+        ### **Pasul 1: 🌐 Import Catalog Foneday**
+        **Ce face:**
+        1. Accesează API Foneday: `GET /products`
+        2. Descarcă **TOATE** produsele disponibile la Foneday (mii de produse)
+        3. Salvează fiecare produs în `foneday_products` (SKU Foneday, preț, stoc, etc.)
+        4. **NORMALIZARE ARTCODES**: Extrage câmpul `artcode` din fiecare produs
+           - `artcode` = SKU-ul TĂU în catalogul Foneday
+           - Poate fi: string simplu, array JSON, etc.
+           - Fiecare artcode este salvat separat în `foneday_artcodes_normalized`
+        
+        **Când să rulezi:** **Săptămânal** (catalogul Foneday nu se schimbă zilnic)
+        
+        **Rezultat:**
+        - Tabel `foneday_products`: catalog complet Foneday
+        - Tabel `foneday_artcodes_normalized`: fiecare artcode pe rând (pentru mapare rapidă)
         
         ---
         
-        ### **Pasul 2: 🗺️ Mapare SKU-uri**
+        ### **Pasul 2: 🗺️ Mapare SKU → Foneday**
         **Ce face:**
-        - Ia fiecare SKU din catalogul tău
-        - Caută în Foneday unde `artcode` = SKU-ul tău
-        - Creează legătura în `sku_artcode_mapping`
+        1. Citește toate SKU-urile PRIMARE din catalogul tău (`v_product_sku` WHERE `is_primary = TRUE`)
+        2. Citește toate artcodes din `foneday_artcodes_normalized`
+        3. **COMPARĂ**: pentru fiecare SKU al tău, verifică dacă apare în artcodes Foneday
+        4. Dacă găsește match → creează mapare în `sku_artcode_mapping`:
+           - `my_sku` = SKU-ul tău
+           - `foneday_artcode` = același cu `my_sku` (câmpul artcode din Foneday)
+           - `foneday_sku` = SKU-ul produsului în catalogul Foneday
         
-        **Când:** După Pasul 1, sau când adaugi produse noi
+        **Când să rulezi:** După Pasul 1, sau când adaugi produse noi în catalog
+        
+        **Exemplu:**
+        - Tu ai SKU: `ABC123`
+        - Foneday are produs cu SKU=`FD-001` și artcode=`["ABC123", "ABC456"]`
+        - Rezultat: mapare `ABC123` (tu) → `FD-001` (Foneday)
+        
+        **Rezultat:**
+        - Tabel `sku_artcode_mapping`: legătura dintre SKU-urile tale și Foneday
         
         ---
         
-        ### **Pasul 3: 🔍 Verificare Stoc (Produse cu stoc zero)**
+        ### **Pasul 3: 🔍 Verificare Disponibilitate (Stoc Zero)**
         **Ce face:**
-        - Găsește produsele tale cu stoc zero (din woo_stoc)
-        - Verifică prin API Foneday dacă sunt disponibile
-        - Salvează în `foneday_inventory`
+        1. Găsește produsele cu **stoc ZERO** în WooCommerce (`v_woo_stock` WHERE `stock_quantity <= 0`)
+        2. Pentru fiecare produs:
+           - Caută maparea în `sku_artcode_mapping` (din Pasul 2)
+           - Verifică **LIVE** prin API Foneday dacă e disponibil: `GET /product/{{foneday_sku}}`
+           - Dacă `instock = "Y"` → salvează în `foneday_inventory`
+        3. Salvează prețul Foneday (EUR) pentru calculul profitului (Pasul 4)
         
-        **Când:** **ZILNIC** pentru reaprovizionare
+        **Când să rulezi:** **ZILNIC** înainte de reaprovizionare
+        
+        **Atenție:** Verifică LIVE prin API = poate dura mult pentru multe produse!
+        
+        **Rezultat:**
+        - Tabel `foneday_inventory`: produse cu stoc 0 la tine, dar disponibile la Foneday
         
         ---
         
         ### **Pasul 4: 🛒 Adăugare Automată în Coș**
         **Ce face:**
-        - Ia produsele disponibile la Foneday
-        - Calculează marja de profit
-        - Dacă profitabil → adaugă 2 bucăți în coș
+        1. Ia produsele din `foneday_inventory` (rezultatul Pasului 3)
+        2. Pentru fiecare produs:
+           - Obține prețul de vânzare din `v_woo_prices` (WooCommerce)
+           - **CALCULEAZĂ PROFITABILITATE**:
+             - Cost RON = Preț Foneday (EUR) × {EUR_RON_RATE}
+             - Preț vânzare fără TVA = Preț WooCommerce / {TVA_RATE}
+             - Marjă profit = (1 - Cost/Preț vânzare) × 100%
+           - Dacă marjă ≥ {(1-MIN_PROFIT_MARGIN)*100:.0f}% → **PROFITABIL**
+        3. Pentru produsele profitabile:
+           - Adaugă **2 bucăți** în coșul Foneday prin API: `POST /shopping-cart-add-items`
+           - Salvează în `foneday_cart` pentru tracking local
         
-        **Când:** După Pasul 3, când vrei să comanzi automat
+        **Când să rulezi:** După Pasul 3, când vrei să comanzi automat
+        
+        **Parametri profit actuali:**
+        - Curs EUR/RON: **{EUR_RON_RATE}**
+        - TVA: **{TVA_RATE}** (21%)
+        - Marjă minimă: **{(1-MIN_PROFIT_MARGIN)*100:.0f}%**
+        
+        **Rezultat:**
+        - Produsele sunt adăugate în coșul tău Foneday (verifică pe foneday.shop)
+        - Tabel `foneday_cart`: tracking local al comenzilor
+        
+        ---
+        
+        ## 📊 Rezumat Flux
+        
+        ```
+        PASUL 1: Import Foneday
+                ↓
+        foneday_products + foneday_artcodes_normalized
+                ↓
+        PASUL 2: Mapare SKU-uri
+                ↓
+        sku_artcode_mapping (my_sku ↔ foneday_sku)
+                ↓
+        PASUL 3: Verifică Stoc Zero
+                ↓
+        foneday_inventory (disponibile la Foneday)
+                ↓
+        PASUL 4: Calcul Profit + Adaugă în Coș
+                ↓
+        foneday_cart + Coș Foneday (pe site)
+        ```
         """)
     
     st.markdown("---")
     
-    tab1, tab2, tab3, tab4 = st.tabs(["1️⃣ Foneday", "2️⃣ Mapare", "3️⃣ Stoc", "4️⃣ Coș"])
+    tab1, tab2, tab3, tab4 = st.tabs(["1️⃣ Foneday", "2️⃣ Mapare", "3️⃣ Stoc Zero", "4️⃣ Coș"])
     
     with tab1:
         st.markdown("## 🌐 PASUL 1: Import Catalog Foneday")
+        st.info("Descarcă toate produsele Foneday și normalizează artcodes pentru mapare")
         if st.button("▶️ Rulează Pasul 1", type="primary", use_container_width=True):
             step1_import_foneday_all_products()
     
     with tab2:
         st.markdown("## 🗺️ PASUL 2: Mapare SKU-uri")
+        st.info("Compară SKU-urile tale cu artcodes Foneday pentru a crea legături")
         if st.button("▶️ Rulează Pasul 2", type="primary", use_container_width=True):
             step2_map_sku_to_artcode()
     
     with tab3:
-        st.markdown("## 🔍 PASUL 3: Verificare Stoc")
+        st.markdown("## 🔍 PASUL 3: Verificare Stoc Zero")
+        st.info("Verifică LIVE în API Foneday care produse cu stoc 0 sunt disponibile")
         if st.button("▶️ Rulează Pasul 3", type="primary", use_container_width=True):
             step3_check_stock_and_prices()
     
     with tab4:
-        st.markdown("## 🛒 PASUL 4: Adăugare în Coș")
+        st.markdown("## 🛒 PASUL 4: Adăugare Automată în Coș")
+        st.info("Calculează profitabilitatea și adaugă produsele profitabile în coșul Foneday (2 buc)")
         if st.button("▶️ Rulează Pasul 4", type="primary", use_container_width=True):
             step4_add_to_cart()
 
 elif page == "💰 Oportunități Profit":
     st.title("💰 Oportunități de Profit")
+    st.markdown("""
+    Caută produse care **AI ÎN STOC** și poți să le cumperi mai ieftin de la Foneday.
+    Util pentru a identifica oportunități de revânzare cu marjă mai mare.
+    """)
     
     min_profit = st.slider("Marjă minimă de profit (%)", 0, 100, 20, 5)
     
@@ -1045,7 +1181,8 @@ elif page == "💰 Oportunități Profit":
             st.info("Nu s-au găsit oportunități cu aceste criterii")
 
 elif page == "📊 Stocuri Critice":
-    st.title("📊 Stocuri Critice")
+    st.title("📊 Stocuri Critice (Stoc Zero)")
+    st.markdown("Produse care au stoc zero în WooCommerce")
     
     try:
         conn = get_db_connection()
@@ -1065,7 +1202,7 @@ elif page == "📊 Stocuri Critice":
             """, conn)
             
             if not df.empty:
-                st.info(f"📦 Găsite {len(df)} produse cu stoc zero")
+                st.info(f"📦 Găsite {len(df)} produse cu stoc zero (primele 100)")
                 st.dataframe(df, use_container_width=True)
             else:
                 st.success("✅ Nu există produse cu stoc zero!")
@@ -1076,6 +1213,7 @@ elif page == "📊 Stocuri Critice":
 
 elif page == "🛒 Coș Foneday":
     st.title("🛒 Coș de Cumpărături Foneday")
+    st.markdown("Produse adăugate automat în coșul Foneday (din Pasul 4)")
     
     try:
         conn = get_db_connection()
@@ -1110,7 +1248,7 @@ elif page == "🛒 Coș Foneday":
                     avg_profit = df['profit_margin'].mean()
                     st.metric("📊 Marjă Medie", f"{avg_profit:.2f}%")
             else:
-                st.info("Coșul este gol")
+                st.info("Coșul este gol. Rulează PASUL 4 pentru a adăuga produse profitabile.")
             
             conn.close()
     except Exception as e:
@@ -1118,6 +1256,7 @@ elif page == "🛒 Coș Foneday":
 
 elif page == "🗺️ Mapări":
     st.title("🗺️ Mapări SKU")
+    st.markdown("Legături între SKU-urile tale și produsele Foneday (rezultatul Pasului 2)")
     
     try:
         conn = get_db_connection()
@@ -1140,7 +1279,7 @@ elif page == "🗺️ Mapări":
                 st.info(f"🗺️ Afișez ultimele 100 mapări")
                 st.dataframe(df, use_container_width=True)
             else:
-                st.info("Nu există mapări. Rulează PASUL 2.")
+                st.info("Nu există mapări. Rulează PASUL 2 pentru a crea mapări.")
             
             conn.close()
     except Exception as e:

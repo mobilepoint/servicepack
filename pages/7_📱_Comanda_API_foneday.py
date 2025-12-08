@@ -252,6 +252,12 @@ def compare_prices_with_apex(products_to_order):
 def step4_add_to_cart_with_apex_comparison():
     """PASUL 4 cu comparare Apex și selecție interactivă"""
 
+    # Inițializare session_state
+    if 'order_processing' not in st.session_state:
+        st.session_state.order_processing = False
+    if 'order_complete' not in st.session_state:
+        st.session_state.order_complete = False
+
     st.markdown("### 🔄 Identificare produse disponibile")
     progress_bar = st.progress(0)
     status_container = st.empty()
@@ -437,13 +443,13 @@ def step4_add_to_cart_with_apex_comparison():
 
         df_display = pd.DataFrame(all_products_display)
 
-        # Folosim session_state pentru a păstra datele între rerulări
-        if 'df_products' not in st.session_state or st.session_state.get('refresh_products', False):
-            st.session_state.df_products = df_display.copy()
-            st.session_state.refresh_products = False
+        # Salvăm în session_state
+        if 'df_products_data' not in st.session_state or st.session_state.order_complete:
+            st.session_state.df_products_data = df_display.copy()
+            st.session_state.order_complete = False
 
         edited_df = st.data_editor(
-            st.session_state.df_products[['selected', 'product_name', 'sku', 'foneday_price', 'apex_price', 'profit_margin', 'status']],
+            st.session_state.df_products_data[['selected', 'product_name', 'sku', 'foneday_price', 'apex_price', 'profit_margin', 'status']],
             column_config={
                 "selected": st.column_config.CheckboxColumn("✓", help="Bifează", default=False),
                 "product_name": "Produs",
@@ -456,19 +462,20 @@ def step4_add_to_cart_with_apex_comparison():
             disabled=['product_name', 'sku', 'foneday_price', 'apex_price', 'profit_margin', 'status'],
             hide_index=True,
             use_container_width=True,
-            key='products_editor'
+            key='products_table'
         )
 
-        # Actualizăm selecția
-        st.session_state.df_products.loc[edited_df.index, 'selected'] = edited_df['selected']
+        # Actualizăm selecția în session_state
+        for idx in edited_df.index:
+            st.session_state.df_products_data.loc[idx, 'selected'] = edited_df.loc[idx, 'selected']
 
         progress_bar.progress(0.8)
 
         # Statistici
-        selected_count = edited_df['selected'].sum()
+        selected_count = st.session_state.df_products_data['selected'].sum()
         if selected_count > 0:
-            selected_indices = edited_df[edited_df['selected'] == True].index
-            total_eur = sum(st.session_state.df_products.iloc[i]['foneday_price_raw'] * 2 for i in selected_indices)
+            selected_indices = st.session_state.df_products_data[st.session_state.df_products_data['selected'] == True].index
+            total_eur = sum(st.session_state.df_products_data.loc[i, 'foneday_price_raw'] * 2 for i in selected_indices)
 
             st.markdown("---")
             col_s1, col_s2, col_s3 = st.columns(3)
@@ -478,24 +485,34 @@ def step4_add_to_cart_with_apex_comparison():
                 st.metric("💶 Total", f"€{total_eur:.2f}")
             with col_s3:
                 st.metric("📊 Bucăți", int(selected_count * 2))
+        else:
+            total_eur = 0
 
         st.markdown("### 📦 Finalizare")
 
         col_b1, col_b2 = st.columns([3, 1])
 
         with col_b1:
-            place_order = st.button("🚀 PLASEAZĂ COMANDA", type="primary", use_container_width=True, key="place_order_btn")
+            # Buton care setează flag în session_state
+            if st.button("🚀 PLASEAZĂ COMANDA", type="primary", use_container_width=True, disabled=selected_count==0):
+                st.session_state.order_processing = True
+                st.rerun()
 
         with col_b2:
             if st.button("🔄 Reset", use_container_width=True):
-                st.session_state.refresh_products = True
+                st.session_state.order_complete = True
                 st.rerun()
 
-        if place_order:
-            if selected_count == 0:
-                st.error("⚠️ Selectează cel puțin un produs!")
+        # PROCESARE COMANDĂ - se execută DUPĂ rerun
+        if st.session_state.order_processing:
+            st.session_state.order_processing = False  # Reset flag
+
+            selected_indices = st.session_state.df_products_data[st.session_state.df_products_data['selected'] == True].index
+
+            if len(selected_indices) == 0:
+                st.error("⚠️ Nu ai selectat produse!")
             else:
-                st.markdown("### 🔄 Plasare comandă...")
+                st.markdown("### 🔄 Plasare comandă în curs...")
 
                 added = 0
                 errors = 0
@@ -503,13 +520,12 @@ def step4_add_to_cart_with_apex_comparison():
                 order_prog = st.progress(0)
                 order_stat = st.empty()
 
-                selected_indices = edited_df[edited_df['selected'] == True].index
-
                 for idx, sel_idx in enumerate(selected_indices):
-                    prod = st.session_state.df_products.iloc[sel_idx]
+                    prod = st.session_state.df_products_data.loc[sel_idx]
 
-                    order_stat.info(f"📦 {idx+1}/{len(selected_indices)}: {prod['product_name']}")
+                    order_stat.info(f"📦 Procesez {idx+1}/{len(selected_indices)}: {prod['product_name']}")
 
+                    # APEL API REAL
                     cart_result = add_to_foneday_cart(prod['foneday_sku'], 2, f"Auto - {prod['sku']}")
 
                     if cart_result:
@@ -527,34 +543,42 @@ def step4_add_to_cart_with_apex_comparison():
                             ))
                             conn.commit()
                             added += 1
-                            log_event("step4_apex_add", f"OK: {prod['sku']}", sku=prod['sku'], status="success")
+                            log_event("step4_apex_add", f"✅ Adăugat: {prod['sku']}", sku=prod['sku'], status="success")
                         except Exception as e:
                             conn.rollback()
                             errors += 1
-                            log_event("step4_apex_error", f"Err: {e}", sku=prod['sku'], status="error")
+                            log_event("step4_apex_error", f"❌ Eroare DB: {str(e)}", sku=prod['sku'], status="error")
                     else:
                         errors += 1
+                        log_event("step4_apex_error", f"❌ API nu a răspuns pentru {prod['sku']}", sku=prod['sku'], status="error")
 
                     order_prog.progress((idx + 1) / len(selected_indices))
-                    time.sleep(0.2)
+                    time.sleep(0.3)  # Rate limiting
 
                 order_stat.empty()
                 order_prog.progress(1.0)
 
                 if added > 0:
                     st.success(f"""
-                    ✅ **SUCCES!**
+                    ✅ **COMANDĂ PLASATĂ CU SUCCES!**
 
-                    - 🛒 {added} produse adăugate
-                    - 💶 Total: €{total_eur:.2f} ({added * 2} buc)
-                    - ⚠️ {errors} erori
+                    - 🛒 **{added} produse** adăugate în coșul Foneday
+                    - 💶 **Total: €{total_eur:.2f}** ({added * 2} bucăți)
+                    - ⚠️ **{errors} erori**
 
-                    🌐 [Verifică coșul Foneday](https://foneday.shop)
+                    🌐 [Verifică coșul pe Foneday](https://foneday.shop)
                     """)
                     st.balloons()
-                    st.session_state.refresh_products = True
+                    log_event("step4_apex_complete", f"✅ Succes: {added} produse, {errors} erori", status="success")
+                    st.session_state.order_complete = True
                 else:
-                    st.error("❌ Eroare! Verifică log-urile.")
+                    st.error(f"""
+                    ❌ **EROARE LA PLASARE COMANDĂ**
+
+                    - Nu s-a putut adăuga niciun produs
+                    - {errors} erori înregistrate
+                    - Verifică log-urile pentru detalii
+                    """)
 
                 cursor.close()
                 return added, errors
@@ -1556,7 +1580,7 @@ elif page == "🔄 Import Individual (Pași)":
     
     with tab4:
         st.markdown("## 🛒 PASUL 4: Adăugare Automată în Coș")
-        st.info("Compară cu Apex și permite selecția interactivă")
+        st.info("Compară cu Apex și plasează comanda interactiv")
         if st.button("▶️ Rulează Pasul 4", type="primary", use_container_width=True):
             step4_add_to_cart_with_apex_comparison()
 

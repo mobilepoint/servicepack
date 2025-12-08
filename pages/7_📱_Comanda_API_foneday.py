@@ -1283,18 +1283,21 @@ elif page == "📊 Comparare APEX":
         else:
             cursor = conn.cursor()
 
-            # 1. Produse disponibile la Foneday (din PASUL 3) + numele tău de produs
+            # 1. Produse disponibile la Foneday + nume produs + preț Woo
             cursor.execute("""
                 SELECT fi.product_id,
                        fi.sku              AS my_sku,
                        p.name              AS product_name,
                        fi.foneday_sku,
-                       fi.price_eur        AS foneday_price_eur
+                       fi.price_eur        AS foneday_price_eur,
+                       wp.regular_price    AS woo_price_ron
                 FROM public.foneday_inventory fi
                 LEFT JOIN product_sku ps
                        ON fi.sku = ps.sku AND ps.is_primary = TRUE
                 LEFT JOIN product p
                        ON ps.product_id = p.id
+                LEFT JOIN v_woo_prices wp
+                       ON fi.sku = wp.sku
                 WHERE fi.instock = TRUE
             """)
             rows = cursor.fetchall()
@@ -1306,14 +1309,28 @@ elif page == "📊 Comparare APEX":
             else:
                 df_foneday = pd.DataFrame(
                     rows,
-                    columns=["product_id", "sku", "product_name", "foneday_sku", "foneday_price_eur"]
+                    columns=[
+                        "product_id",
+                        "sku",
+                        "product_name",
+                        "foneday_sku",
+                        "foneday_price_eur",
+                        "woo_price_ron",
+                    ],
+                )
+
+                # Asigurăm tipuri numerice
+                df_foneday["foneday_price_eur"] = pd.to_numeric(
+                    df_foneday["foneday_price_eur"], errors="coerce"
+                )
+                df_foneday["woo_price_ron"] = pd.to_numeric(
+                    df_foneday["woo_price_ron"], errors="coerce"
                 )
 
                 # 2. Prețurile APEX pentru aceleași SKU-uri (cod = SKU)
                 cursor.execute("""
                     SELECT an.cod        AS sku,
-                           an.pret_eur  AS apex_price_eur,
-                           an.nume_apex
+                           an.pret_eur  AS apex_price_eur
                     FROM public.apex_normalized an
                     WHERE an.cod IS NOT NULL
                       AND an.cod IN (
@@ -1323,13 +1340,18 @@ elif page == "📊 Comparare APEX":
                       )
                 """)
                 apex_rows = cursor.fetchall()
+                cursor.close()
+                conn.close()
 
-                df_apex = pd.DataFrame(apex_rows, columns=["sku", "apex_price_eur", "nume_apex"])
+                df_apex = pd.DataFrame(apex_rows, columns=["sku", "apex_price_eur"])
+                df_apex["apex_price_eur"] = pd.to_numeric(
+                    df_apex["apex_price_eur"], errors="coerce"
+                )
 
                 # 3. Join Foneday + APEX pe SKU
                 df = df_foneday.merge(df_apex, on="sku", how="left")
 
-                # 4. Calcul diferențe de preț
+                # 4. Calcul diferență de preț și marjă Foneday–Woo
                 df["diff_eur"] = df["apex_price_eur"] - df["foneday_price_eur"]
 
                 def cheaper(row):
@@ -1343,8 +1365,16 @@ elif page == "📊 Comparare APEX":
 
                 df["cheaper_source"] = df.apply(cheaper, axis=1)
 
-                # 5. Pregătim pentru selecție: bifezi ce trimiți în Foneday
-                #   - implicit selectăm ce are Foneday mai ieftin sau nu există în APEX
+                def margin_fw(row):
+                    if pd.isnull(row["woo_price_ron"]) or pd.isnull(row["foneday_price_eur"]):
+                        return None
+                    return calculate_profit_margin(
+                        row["foneday_price_eur"], row["woo_price_ron"]
+                    )
+
+                df["margin_fw"] = df.apply(margin_fw, axis=1)
+
+                # 5. Selectare inițială: Foneday mai ieftin sau doar Foneday
                 df["selected"] = df["cheaper_source"].isin(["Foneday", "Doar Foneday"])
 
                 st.info(f"Găsite {len(df)} produse în `foneday_inventory` pentru comparație.")
@@ -1356,7 +1386,7 @@ elif page == "📊 Comparare APEX":
                 with col2:
                     cheaper_choice = st.selectbox(
                         "Filtru după sursa mai ieftină",
-                        ["Toate", "Foneday mai ieftin", "APEX mai ieftin", "Doar Foneday"]
+                        ["Toate", "Foneday mai ieftin", "APEX mai ieftin", "Doar Foneday"],
                     )
 
                 df_view = df.copy()
@@ -1371,20 +1401,22 @@ elif page == "📊 Comparare APEX":
                     df_view = df_view[df_view["cheaper_source"] == "Doar Foneday"]
 
                 # 7. Editor cu checkbox "selected"
+                #    (fără Nume APEX și fără coloana diff_eur în afișaj)
+                display_cols = [
+                    "selected",
+                    "sku",
+                    "product_name",
+                    "foneday_sku",
+                    "foneday_price_eur",
+                    "apex_price_eur",
+                    "margin_fw",
+                    "cheaper_source",
+                ]
+
+                df_view_editor = df_view[display_cols].copy()
+
                 edited = st.data_editor(
-                    df_view[
-                        [
-                            "selected",
-                            "sku",
-                            "product_name",
-                            "nume_apex",
-                            "foneday_sku",
-                            "foneday_price_eur",
-                            "apex_price_eur",
-                            "diff_eur",
-                            "cheaper_source",
-                        ]
-                    ],
+                    df_view_editor,
                     column_config={
                         "selected": st.column_config.CheckboxColumn(
                             "✓",
@@ -1392,11 +1424,10 @@ elif page == "📊 Comparare APEX":
                         ),
                         "sku": "SKU",
                         "product_name": "Produs (catalogul tău)",
-                        "nume_apex": "Nume APEX",
                         "foneday_sku": "SKU Foneday",
                         "foneday_price_eur": "Preț Foneday (€)",
                         "apex_price_eur": "Preț APEX (€)",
-                        "diff_eur": "APEX - Foneday (€)",
+                        "margin_fw": "Marjă Foneday–Woo (%)",
                         "cheaper_source": "Mai ieftin",
                     },
                     hide_index=True,
@@ -1404,13 +1435,16 @@ elif page == "📊 Comparare APEX":
                     key="apex_compare_editor",
                 )
 
-                # actualizăm selecția în df complet (nu doar view)
-                df.set_index("sku", inplace=True)
-                edited_local = edited.set_index("sku")
-                df.loc[edited_local.index, "selected"] = edited_local["selected"].values
-                df.reset_index(inplace=True)
+                # 8. Luăm direct din DataFrame-ul editat ce este bifat
+                selected_edited = edited[edited["selected"] == True].copy()
 
-                to_send = df[df["selected"] == True].copy()
+                # Join cu df complet pentru a avea și product_id, woo_price_ron etc.
+                to_send = selected_edited.merge(
+                    df,
+                    on=["sku", "foneday_sku", "foneday_price_eur", "apex_price_eur", "cheaper_source", "margin_fw"],
+                    how="left",
+                    suffixes=("", "_orig"),
+                )
 
                 st.markdown("### 🛒 Rezumat selecție")
                 col_a, col_b = st.columns(2)
@@ -1420,36 +1454,32 @@ elif page == "📊 Comparare APEX":
                     total_est = (to_send["foneday_price_eur"] * 2).sum()
                     st.metric("Valoare estimată (2 buc/produs)", f"€{total_est:.2f}")
 
-                # 8. Buton: trimite în Foneday ce este bifat
+                # 9. Buton: trimite în Foneday ce este bifat
                 if not to_send.empty:
                     if st.button("🚀 Trimite în coș Foneday produsele selectate", type="primary"):
+                        conn = get_db_connection()
+                        if not conn:
+                            st.error("❌ Nu pot reconecta la baza de date pentru salvarea în coș.")
+                            return
+                        cursor = conn.cursor()
+
                         progress = st.progress(0)
                         status = st.empty()
                         added = 0
                         errors = 0
-
-                        # rămânem cu conexiunea deschisă pentru salvare în DB
-                        cursor = conn.cursor()
 
                         for i, row in to_send.reset_index(drop=True).iterrows():
                             status.info(
                                 f"📦 {i+1}/{len(to_send)} – {row['product_name']} ({row['sku']})"
                             )
 
-                            # luăm prețul Woo pentru marjă (ca în Pasul 4)
-                            cursor.execute(
-                                """
-                                SELECT regular_price
-                                FROM v_woo_prices
-                                WHERE sku = %s
-                                """,
-                                (row["sku"],),
-                            )
-                            price_result = cursor.fetchone()
-                            woo_price_ron = float(price_result[0]) if price_result and price_result[0] else 0
-
-                            profit_margin = calculate_profit_margin(
-                                row["foneday_price_eur"], woo_price_ron
+                            woo_price_ron = float(row.get("woo_price_ron", 0) or 0)
+                            profit_margin = (
+                                float(row["margin_fw"])
+                                if row.get("margin_fw") is not None
+                                else calculate_profit_margin(
+                                    row["foneday_price_eur"], woo_price_ron
+                                )
                             )
 
                             cart_result = add_to_foneday_cart(
@@ -1463,14 +1493,14 @@ elif page == "📊 Comparare APEX":
                                     cursor.execute(
                                         """
                                         INSERT INTO public.foneday_cart
-                                        (product_id, sku, foneday_sku, quantity,
-                                         price_eur, woo_price_ron,
-                                         profit_margin, is_profitable,
-                                         status, note)
+                                            (product_id, sku, foneday_sku, quantity,
+                                             price_eur, woo_price_ron,
+                                             profit_margin, is_profitable,
+                                             status, note)
                                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                                         """,
                                         (
-                                            row["product_id"],
+                                            row.get("product_id"),
                                             row["sku"],
                                             row["foneday_sku"],
                                             2,
@@ -1479,7 +1509,7 @@ elif page == "📊 Comparare APEX":
                                             profit_margin,
                                             True,
                                             "added_to_cart",
-                                            f"Trimis din Comparare APEX – 2 buc",
+                                            "Trimis din Comparare APEX – 2 buc",
                                         ),
                                     )
                                     conn.commit()
@@ -1511,6 +1541,7 @@ elif page == "📊 Comparare APEX":
 
     except Exception as e:
         st.error(f"Eroare în pagina «Comparare APEX»: {e}")
+
 
         
 

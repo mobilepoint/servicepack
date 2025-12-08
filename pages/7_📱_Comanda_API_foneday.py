@@ -160,6 +160,476 @@ def add_to_foneday_cart(foneday_sku: str, quantity: int, note: str = None):
     except Exception as e:
         return None
 
+
+# ===== FUNCȚII COMPARARE PREȚURI APEX =====
+
+def get_apex_prices():
+    """Obține prețurile din tabelul apex_normalized"""
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return {}
+
+        cursor = conn.cursor()
+        # Folosește coloanele reale: cod (SKU), pret_eur, pret_lei
+        cursor.execute("""
+            SELECT cod, pret_eur, pret_lei, cantitate
+            FROM apex_normalized
+            WHERE cod IS NOT NULL
+        """)
+
+        apex_prices = {}
+        for cod, pret_eur, pret_lei, cantitate in cursor.fetchall():
+            # Salvează ambele prețuri pentru flexibilitate
+            # Prioritizăm pret_eur dacă există, altfel convertim din pret_lei
+            if pret_eur and float(pret_eur) > 0:
+                price_eur = float(pret_eur)
+            elif pret_lei and float(pret_lei) > 0:
+                price_eur = float(pret_lei) / EUR_RON_RATE
+            else:
+                continue  # Sări peste produse fără preț valid
+
+            apex_prices[cod] = {
+                'price_eur': price_eur,
+                'price_lei': float(pret_lei) if pret_lei else None,
+                'cantitate': cantitate
+            }
+
+        cursor.close()
+        return apex_prices
+    except Exception as e:
+        st.error(f"Eroare citire prețuri Apex: {e}")
+        return {}
+    finally:
+        if conn:
+            conn.close()
+
+def compare_prices_with_apex(products_to_order):
+    """
+    Compară prețurile Foneday cu Apex și returnează raport
+
+    Args:
+        products_to_order: Lista cu (product_id, sku, foneday_sku, foneday_price, woo_price)
+
+    Returns:
+        dict cu: 
+        - cheaper_at_foneday: liste produse mai ieftine la Foneday
+        - cheaper_at_apex: liste produse mai ieftine la Apex
+        - not_in_apex: liste produse care nu sunt la Apex
+        - equal_price: liste produse cu preț egal
+    """
+    apex_prices = get_apex_prices()
+
+    result = {
+        'cheaper_at_foneday': [],
+        'cheaper_at_apex': [],
+        'not_in_apex': [],
+        'equal_price': []
+    }
+
+    for product_id, sku, foneday_sku, foneday_price_eur, woo_price_ron in products_to_order:
+        foneday_price = float(foneday_price_eur)
+
+        if sku not in apex_prices:
+            # Produs nu există la Apex
+            result['not_in_apex'].append({
+                'product_id': product_id,
+                'sku': sku,
+                'foneday_sku': foneday_sku,
+                'foneday_price': foneday_price,
+                'apex_price': None,
+                'apex_stock': None,
+                'woo_price': float(woo_price_ron),
+                'difference': None
+            })
+        else:
+            apex_data = apex_prices[sku]
+            apex_price = apex_data['price_eur']
+            difference = foneday_price - apex_price
+
+            product_info = {
+                'product_id': product_id,
+                'sku': sku,
+                'foneday_sku': foneday_sku,
+                'foneday_price': foneday_price,
+                'apex_price': apex_price,
+                'apex_stock': apex_data['cantitate'],
+                'woo_price': float(woo_price_ron),
+                'difference': difference,
+                'difference_pct': (difference / apex_price * 100) if apex_price > 0 else 0
+            }
+
+            if abs(difference) < 0.01:  # Prețuri egale (toleranță 1 cent)
+                result['equal_price'].append(product_info)
+            elif foneday_price <= apex_price:
+                # Mai ieftin sau egal la Foneday
+                result['cheaper_at_foneday'].append(product_info)
+            else:
+                # Mai ieftin la Apex
+                result['cheaper_at_apex'].append(product_info)
+
+    return result
+
+def step4_add_to_cart_with_apex_comparison():
+    """PASUL 4 ÎMBUNĂTĂȚIT: Cu comparare Apex și selecție interactivă"""
+
+    st.markdown("### 🔄 Pasul 1: Identificare produse disponibile")
+    progress_bar = st.progress(0)
+    status_container = st.empty()
+
+    log_event("step4_apex_start", "PASUL 4 cu comparare Apex: Start", status="info")
+    status_container.info("🛒 Verific produse profitabile...")
+
+    conn = None
+    try:
+        conn = get_db_connection()
+        if not conn:
+            st.error("❌ Nu pot conecta la baza de date")
+            return 0, 0
+
+        cursor = conn.cursor()
+
+        # Găsește produse disponibile la Foneday (din PASUL 3)
+        cursor.execute("""
+            SELECT fi.product_id, fi.sku, fi.foneday_sku, fi.price_eur
+            FROM public.foneday_inventory fi
+            WHERE fi.instock = TRUE
+        """)
+
+        available_products = cursor.fetchall()
+
+        if not available_products:
+            status_container.info("Nu există produse disponibile la Foneday. Rulează PASUL 3!")
+            log_event("step4_apex_complete", "Nu există produse disponibile", status="info")
+            cursor.close()
+            return 0, 0
+
+        progress_bar.progress(0.2)
+        status_container.info(f"💰 Analizez profitabilitatea pentru {len(available_products)} produse...")
+
+        # Filtrează produse profitabile
+        profitable_products = []
+
+        for product_id, my_sku, foneday_sku, foneday_price in available_products:
+            try:
+                foneday_price_float = float(foneday_price) if foneday_price else 0
+            except (ValueError, TypeError):
+                continue
+
+            if foneday_price_float <= 0:
+                continue
+
+            # Obține prețul de vânzare din WooCommerce
+            cursor.execute("""
+                SELECT regular_price FROM v_woo_prices WHERE sku = %s
+            """, (my_sku,))
+            price_result = cursor.fetchone()
+
+            if not price_result or not price_result[0]:
+                continue
+
+            try:
+                woo_price_float = float(price_result[0])
+            except (ValueError, TypeError):
+                continue
+
+            if woo_price_float <= 0:
+                continue
+
+            # Verifică profitabilitate
+            if is_profitable(foneday_price_float, woo_price_float):
+                profit_margin = calculate_profit_margin(foneday_price_float, woo_price_float)
+                profitable_products.append((
+                    product_id, my_sku, foneday_sku, 
+                    foneday_price_float, woo_price_float, profit_margin
+                ))
+
+        if not profitable_products:
+            st.warning("⚠️ Nu există produse profitabile în acest moment.")
+            cursor.close()
+            return 0, 0
+
+        progress_bar.progress(0.4)
+        status_container.success(f"✅ Găsite {len(profitable_products)} produse profitabile")
+
+        # COMPARARE CU APEX
+        st.markdown("### 📊 Pasul 2: Comparare prețuri cu Apex")
+        status_container.info("🔍 Compar prețurile cu Apex...")
+
+        # Pregătește datele pentru comparare (fără profit_margin)
+        products_for_comparison = [
+            (pid, sku, fsku, fprice, wprice) 
+            for pid, sku, fsku, fprice, wprice, _ in profitable_products
+        ]
+
+        comparison = compare_prices_with_apex(products_for_comparison)
+
+        progress_bar.progress(0.6)
+
+        # AFIȘARE RAPORT COMPARARE
+        st.markdown("### 📋 Raport Comparare Prețuri")
+
+        # Statistici generale
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("✅ Mai ieftin la Foneday", len(comparison['cheaper_at_foneday']))
+        with col2:
+            st.metric("❌ Mai ieftin la Apex", len(comparison['cheaper_at_apex']))
+        with col3:
+            st.metric("➕ Nu există la Apex", len(comparison['not_in_apex']))
+        with col4:
+            st.metric("⚖️ Preț egal", len(comparison['equal_price']))
+
+        st.markdown("---")
+
+        # Creează DataFrame pentru afișare și selecție
+        all_products_display = []
+
+        # Adaugă produse mai ieftine la Foneday (PRE-SELECTATE)
+        for p in comparison['cheaper_at_foneday']:
+            profit = next((pm for pid, sku, _, _, _, pm in profitable_products if sku == p['sku']), 0)
+            all_products_display.append({
+                'selected': True,  # PRE-SELECTAT
+                'sku': p['sku'],
+                'foneday_sku': p['foneday_sku'],
+                'foneday_price': f"€{p['foneday_price']:.2f}",
+                'apex_price': f"€{p['apex_price']:.2f}" if p['apex_price'] else "N/A",
+                'apex_stock': p['apex_stock'] if p['apex_stock'] else "N/A",
+                'diferenta': f"-€{abs(p['difference']):.2f}" if p['difference'] else "N/A",
+                'profit_margin': f"{profit:.1f}%",
+                'status': '✅ Mai ieftin la Foneday',
+                'product_id': p['product_id'],
+                'foneday_price_raw': p['foneday_price'],
+                'woo_price_raw': p['woo_price']
+            })
+
+        # Adaugă produse egale (PRE-SELECTATE)
+        for p in comparison['equal_price']:
+            profit = next((pm for pid, sku, _, _, _, pm in profitable_products if sku == p['sku']), 0)
+            all_products_display.append({
+                'selected': True,  # PRE-SELECTAT
+                'sku': p['sku'],
+                'foneday_sku': p['foneday_sku'],
+                'foneday_price': f"€{p['foneday_price']:.2f}",
+                'apex_price': f"€{p['apex_price']:.2f}",
+                'apex_stock': p['apex_stock'] if p['apex_stock'] else "N/A",
+                'diferenta': "€0.00",
+                'profit_margin': f"{profit:.1f}%",
+                'status': '⚖️ Preț egal',
+                'product_id': p['product_id'],
+                'foneday_price_raw': p['foneday_price'],
+                'woo_price_raw': p['woo_price']
+            })
+
+        # Adaugă produse care nu există la Apex (PRE-SELECTATE)
+        for p in comparison['not_in_apex']:
+            profit = next((pm for pid, sku, _, _, _, pm in profitable_products if sku == p['sku']), 0)
+            all_products_display.append({
+                'selected': True,  # PRE-SELECTAT
+                'sku': p['sku'],
+                'foneday_sku': p['foneday_sku'],
+                'foneday_price': f"€{p['foneday_price']:.2f}",
+                'apex_price': "N/A",
+                'apex_stock': "N/A",
+                'diferenta': "N/A",
+                'profit_margin': f"{profit:.1f}%",
+                'status': '➕ Nu există la Apex',
+                'product_id': p['product_id'],
+                'foneday_price_raw': p['foneday_price'],
+                'woo_price_raw': p['woo_price']
+            })
+
+        # Adaugă produse mai ieftine la Apex (NESELECTATE)
+        for p in comparison['cheaper_at_apex']:
+            profit = next((pm for pid, sku, _, _, _, pm in profitable_products if sku == p['sku']), 0)
+            all_products_display.append({
+                'selected': False,  # NESELECTAT
+                'sku': p['sku'],
+                'foneday_sku': p['foneday_sku'],
+                'foneday_price': f"€{p['foneday_price']:.2f}",
+                'apex_price': f"€{p['apex_price']:.2f}",
+                'apex_stock': p['apex_stock'] if p['apex_stock'] else "N/A",
+                'diferenta': f"+€{p['difference']:.2f}",
+                'profit_margin': f"{profit:.1f}%",
+                'status': '❌ Mai scump la Foneday',
+                'product_id': p['product_id'],
+                'foneday_price_raw': p['foneday_price'],
+                'woo_price_raw': p['woo_price']
+            })
+
+        if not all_products_display:
+            st.info("Nu există produse de afișat.")
+            cursor.close()
+            return 0, 0
+
+        # Afișare tabel interactiv cu data_editor
+        st.markdown("### 🛒 Selectează produsele pentru comandă")
+        st.markdown("""
+        ✅ **Produsele PRE-SELECTATE** sunt recomandate pentru comandă (preț mai mic sau egal la Foneday, sau nu există la Apex)  
+        ❌ **Produsele NESELECTATE** sunt mai scumpe la Foneday decât la Apex  
+        💡 **Poți modifica selecția** bifând/debifând checkbox-urile din coloana "Selectat"
+        """)
+
+        df_display = pd.DataFrame(all_products_display)
+
+        # Configurare editor
+        edited_df = st.data_editor(
+            df_display[['selected', 'sku', 'foneday_price', 'apex_price', 'apex_stock', 'diferenta', 'profit_margin', 'status']],
+            column_config={
+                "selected": st.column_config.CheckboxColumn(
+                    "Selectat",
+                    help="Bifează pentru a adăuga în coș",
+                    default=False,
+                ),
+                "sku": "SKU",
+                "foneday_price": "Preț Foneday",
+                "apex_price": "Preț Apex",
+                "apex_stock": "Stoc Apex",
+                "diferenta": "Diferență",
+                "profit_margin": "Marjă Profit",
+                "status": "Status"
+            },
+            disabled=['sku', 'foneday_price', 'apex_price', 'apex_stock', 'diferenta', 'profit_margin', 'status'],
+            hide_index=True,
+            use_container_width=True
+        )
+
+        progress_bar.progress(0.8)
+
+        # Butoane de acțiune
+        st.markdown("---")
+        col_btn1, col_btn2, col_btn3 = st.columns([2, 2, 1])
+
+        with col_btn1:
+            if st.button("✅ Selectează toate", use_container_width=True):
+                edited_df['selected'] = True
+                st.rerun()
+
+        with col_btn2:
+            if st.button("❌ Deselectează toate", use_container_width=True):
+                edited_df['selected'] = False
+                st.rerun()
+
+        # Buton final pentru comandă
+        st.markdown("### 📦 Finalizare comandă")
+
+        selected_products = edited_df[edited_df['selected'] == True]
+
+        if len(selected_products) > 0:
+            st.info(f"📊 Ai selectat **{len(selected_products)}** produse pentru comandă")
+
+            # Calculează totaluri
+            selected_indices = edited_df[edited_df['selected'] == True].index
+            total_eur = sum(df_display.iloc[i]['foneday_price_raw'] * 2 for i in selected_indices)  # 2 bucăți
+
+            col_sum1, col_sum2 = st.columns(2)
+            with col_sum1:
+                st.metric("💶 Total comandă", f"€{total_eur:.2f} (2 buc/produs)")
+            with col_sum2:
+                st.metric("📦 Produse selectate", len(selected_products))
+
+            if st.button("🚀 PLASEAZĂ COMANDA LA FONEDAY", type="primary", use_container_width=True):
+                st.markdown("### 🔄 Plasare comandă în progres...")
+
+                added_to_cart = 0
+                errors = 0
+
+                order_progress = st.progress(0)
+                order_status = st.empty()
+
+                for idx, sel_idx in enumerate(selected_indices):
+                    product_data = df_display.iloc[sel_idx]
+
+                    order_status.info(f"📦 Adaug {idx+1}/{len(selected_indices)}: {product_data['sku']}")
+
+                    # Adaugă în coșul Foneday prin API (2 bucăți)
+                    cart_result = add_to_foneday_cart(
+                        product_data['foneday_sku'], 
+                        2, 
+                        f"Auto-import - {product_data['sku']}"
+                    )
+
+                    if cart_result:
+                        try:
+                            # Salvează în baza de date locală
+                            cursor.execute("""
+                                INSERT INTO public.foneday_cart
+                                (product_id, sku, foneday_sku, quantity, price_eur, woo_price_ron,
+                                profit_margin, is_profitable, status, note)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """, (
+                                product_data['product_id'],
+                                product_data['sku'],
+                                product_data['foneday_sku'],
+                                2,
+                                product_data['foneday_price_raw'],
+                                product_data['woo_price_raw'],
+                                float(product_data['profit_margin'].rstrip('%')),
+                                True,
+                                'added_to_cart',
+                                f"{product_data['status']} - 2 buc"
+                            ))
+                            conn.commit()
+                            added_to_cart += 1
+                            log_event("step4_apex_add", f"Adăugat: {product_data['sku']}", 
+                                     sku=product_data['sku'], status="success")
+                        except Exception as e:
+                            conn.rollback()
+                            errors += 1
+                            log_event("step4_apex_error", f"Eroare salvare: {str(e)}", 
+                                     sku=product_data['sku'], status="error")
+                    else:
+                        errors += 1
+                        log_event("step4_apex_warning", f"Eroare API Foneday: {product_data['sku']}", 
+                                 sku=product_data['sku'], status="warning")
+
+                    order_progress.progress((idx + 1) / len(selected_indices))
+                    time.sleep(0.2)  # Rate limiting
+
+                order_status.empty()
+                order_progress.progress(1.0)
+
+                # Mesaj final
+                if added_to_cart > 0:
+                    st.success(f"""
+                    ✅ **COMANDĂ PLASATĂ CU SUCCES!**
+
+                    - 🛒 **{added_to_cart} produse** adăugate în coșul Foneday
+                    - ⚠️ **{errors} erori** (dacă există)
+                    - 💶 **Total: €{total_eur:.2f}** (cantitate: {added_to_cart * 2} bucăți)
+
+                    🌐 Verifică coșul pe [foneday.shop](https://foneday.shop)
+                    """)
+                    log_event("step4_apex_complete", 
+                             f"Comandă finalizată: {added_to_cart} produse, {errors} erori", 
+                             status="success")
+                else:
+                    st.error("❌ Nu s-a putut plasa comanda. Verifică log-urile pentru detalii.")
+                    log_event("step4_apex_error", "Comandă eșuată", status="error")
+
+                cursor.close()
+                return added_to_cart, errors
+        else:
+            st.warning("⚠️ Nu ai selectat niciun produs. Bifează produsele dorite și apasă butonul de comandă.")
+
+        cursor.close()
+        progress_bar.progress(1.0)
+
+        return 0, 0
+
+    except Exception as e:
+        error_msg = f"Eroare PASUL 4 cu Apex: {e}"
+        st.error(f"❌ {error_msg}")
+        log_event("step4_apex_error", error_msg, status="error")
+        import traceback
+        st.code(traceback.format_exc())
+        return 0, 0
+    finally:
+        if conn:
+            conn.close()
+
+
 # ===== FUNCȚII HELPERS =====
 def get_product_info_from_catalog(sku: str):
     """Obține informații produs din catalog"""
@@ -733,7 +1203,7 @@ def step3_check_stock_and_prices():
             conn.close()
 
 # ============ PASUL 4: Adaugă în coș ============
-def step4_add_to_cart():
+def step4_add_to_cart_with_apex_comparison():
     """PASUL 4: Calculează profitabilitate și adaugă produse în coșul Foneday"""
     progress_bar = st.progress(0)
     status_container = st.empty()
@@ -1141,9 +1611,9 @@ elif page == "🔄 Import Individual (Pași)":
     
     with tab4:
         st.markdown("## 🛒 PASUL 4: Adăugare Automată în Coș")
-        st.info("Calculează profitabilitatea și adaugă produsele profitabile în coșul Foneday (2 buc)")
+        st.info("Compară prețurile cu Apex, afișează raport detaliat și permite selecția produselor pentru comandă")
         if st.button("▶️ Rulează Pasul 4", type="primary", use_container_width=True):
-            step4_add_to_cart()
+            step4_add_to_cart_with_apex_comparison()
 
 elif page == "💰 Oportunități Profit":
     st.title("💰 Oportunități de Profit")

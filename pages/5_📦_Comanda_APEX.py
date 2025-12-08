@@ -297,12 +297,6 @@ def save_apex_exclude_codes(codes: list[str]) -> bool:
             conn.close()
         return False
 
-
-# =========================
-# SALVARE ÎN BD (CORECTATĂ)
-# =========================
-
-
 def delete_apex_exclude_codes(codes: list[str]) -> bool:
     """Șterge codurile selectate din apex_exclude."""
     if not codes:
@@ -332,6 +326,65 @@ def delete_apex_exclude_codes(codes: list[str]) -> bool:
             conn.close()
         return False
 
+
+def read_smartbill_file(file) -> pd.DataFrame:
+    """
+    Citește fișierul SmartBill cu structură fixă:
+    - Header pe rândul 10 (index 9)
+    - Coloana 3 (C): Cod produs
+    - Coloana 5 (E): Stoc initial
+    - Coloana 6 (F): Intrari
+    - Coloana 7 (G): Iesiri
+    - Coloana 8 (H): Stoc final
+    """
+    try:
+        # Citim fișierul cu header pe rândul 10 (index 9)
+        df = pd.read_excel(file, header=9)
+
+        # Extragem doar coloanele necesare prin poziție (0-indexed)
+        # Coloana C (cod) = index 2
+        # Coloana E (stoc initial) = index 4
+        # Coloana F (intrari) = index 5
+        # Coloana G (iesiri) = index 6
+        # Coloana H (stoc final) = index 7
+
+        if df.shape[1] < 8:
+            st.error(f"Fișierul SmartBill nu are suficiente coloane (găsite {df.shape[1]}, necesare minim 8)")
+            return pd.DataFrame()
+
+        # Selectăm coloanele prin poziție
+        result = pd.DataFrame({
+            'cod': df.iloc[:, 2],  # Coloana C (index 2)
+            'stoc initial': df.iloc[:, 4],  # Coloana E (index 4)
+            'intrari': df.iloc[:, 5],  # Coloana F (index 5)
+            'iesiri': df.iloc[:, 6],  # Coloana G (index 6)
+            'stoc final': df.iloc[:, 7]  # Coloana H (index 7)
+        })
+
+        # Curățăm codul
+        result['cod'] = result['cod'].astype(str).str.strip()
+        result = result[result['cod'].str.strip() != '']
+        result = result[result['cod'] != 'nan']
+        result = result[result['cod'] != 'None']
+
+        # Convertim valorile numerice
+        for col in ['stoc initial', 'intrari', 'iesiri', 'stoc final']:
+            result[col] = pd.to_numeric(result[col], errors='coerce').fillna(0)
+
+        st.info(f"📊 SmartBill: încărcate {len(result)} produse")
+        return result
+
+    except Exception as e:
+        st.error(f"❌ Eroare la citire SmartBill: {e}")
+        import traceback
+        st.error(f"Detalii: {traceback.format_exc()}")
+        return pd.DataFrame()
+
+
+
+# =========================
+# SALVARE ÎN BD (CORECTATĂ)
+# =========================
 
 def save_apex_normalized_to_db(df: pd.DataFrame) -> bool:
     """
@@ -701,7 +754,10 @@ if apex_df_normalized is not None and smartbill_file:
 
     # 2) SmartBill
     try:
-        smart_df = pd.read_excel(smartbill_file)
+        smart_df = read_smartbill_file(smartbill_file)
+        if smart_df.empty:
+            st.error("Fișierul SmartBill este gol sau invalid")
+            st.stop()
     except Exception as e:
         st.error(f"Eroare SmartBill: {e}")
         st.stop()

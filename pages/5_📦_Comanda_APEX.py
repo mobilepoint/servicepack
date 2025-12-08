@@ -313,6 +313,59 @@ def expand_apex_rows(df_norm_cols: pd.DataFrame) -> pd.DataFrame:
 
     out = out.drop_duplicates().reset_index(drop=True)
     return out
+@st.cache_data(ttl=600, show_spinner=False)
+def load_apex_exclude_codes() -> set[str]:
+    """
+    Încarcă lista de coduri excluse din tabelul apex_exclude.
+    """
+    conn = get_db_connection()
+    if not conn:
+        return set()
+
+    try:
+        df = pd.read_sql("SELECT cod FROM apex_exclude;", conn)
+        return set(df["cod"].astype(str).str.strip())
+    except Exception as e:
+        st.error(f"❌ Eroare la citire apex_exclude: {e}")
+        return set()
+    finally:
+        conn.close()
+def save_apex_exclude_codes(codes: list[str]) -> bool:
+    """
+    Salvează codurile selectate în apex_exclude (insert ignore pe duplicate).
+    """
+    if not codes:
+        st.warning("Nu ai selectat niciun produs pentru excludere.")
+        return False
+
+    conn = get_db_connection()
+    if not conn:
+        st.error("❌ Nu pot salva excluderile - lipsește conexiunea DB")
+        return False
+
+    try:
+        cursor = conn.cursor()
+        insert_sql = """
+            INSERT INTO apex_exclude (cod)
+            VALUES (%s)
+            ON CONFLICT (cod) DO NOTHING;
+        """
+        data = [(str(c)) for c in codes]
+        cursor.executemany(insert_sql, [(c,) for c in data])
+        conn.commit()
+        st.success(f"✅ Salvate {len(set(data))} coduri în lista de excluderi.")
+        cursor.close()
+        conn.close()
+        # invalidează cache-ul local
+        load_apex_exclude_codes.clear()
+        return True
+    except Exception as e:
+        st.error(f"❌ Eroare la salvare excluderi: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
+        return False
+
 
 # =========================
 # SALVARE ÎN BD
@@ -386,29 +439,136 @@ with c2:
 # =========================
 apex_df_normalized = None
 
+apex_df_normalized = None
+
 if apex_file:
     st.markdown("---")
     st.markdown("### 📊 Pas 1 — Normalizare APEX")
+    
     try:
         apex_raw = read_any_apex(apex_file)
         apex_trim = normalize_apex_columns(apex_raw)
-        apex_df_normalized = expand_apex_rows(apex_trim)
+        apex_df_normalized_raw = expand_apex_rows(apex_trim)
     except Exception as e:
         st.error(f"Eroare la normalizare APEX: {e}")
         st.stop()
-
-    st.success("✅ APEX normalizat: coduri multiple separate, prețuri calculate")
-    cols_show_norm = [c for c in ["cod", "nume_apex", "cantitate", "pret_eur", "pret_lei", "order_hint"] if c in apex_df_normalized.columns]
+    
+    # ============================================
+    # APLICĂ EXCLUDERILE - ELIMINĂ CODURILE IGNORATE
+    # ============================================
+    exclude_codes = load_apex_exclude_codes()
+    apex_df_normalized_raw["cod_canon"] = apex_df_normalized_raw["cod"].map(canon_sku)
+    mask_not_excluded = ~apex_df_normalized_raw["cod_canon"].isin(exclude_codes)
+    
+    # Datele finale = doar produsele neexcluse
+    apex_df_normalized = apex_df_normalized_raw[mask_not_excluded].reset_index(drop=True)
+    
+    # Produsele excluse (pentru preview opțional)
+    apex_excluded = apex_df_normalized_raw[~mask_not_excluded].reset_index(drop=True)
+    
+    if not apex_excluded.empty:
+        st.info(f"🚫 {len(apex_excluded)} produse excluse (ignorate) din import")
+    
+    st.success(f"✅ APEX normalizat: {len(apex_df_normalized)} produse active (fără excluderi)")
+    
+    cols_show_norm = [c for c in ["cod", "nume_apex", "cantitate", "pret_eur", "pret_lei", "order_hint"] 
+                      if c in apex_df_normalized.columns]
     st.dataframe(apex_df_normalized[cols_show_norm].fillna(""), use_container_width=True)
-
-    # Butoane acțiuni
+    
+    # ============================================
+    # UI PENTRU GESTIONARE EXCLUDERI
+    # ============================================
+    st.markdown("---")
+    st.markdown("#### 🧹 Gestionare excluderi permanente")
+    
+    if "apex_exclude_selected" not in st.session_state:
+        st.session_state.apex_exclude_selected = set()
+    
+    all_codes_current = apex_df_normalized["cod_canon"].tolist()
+    
+    col_sel1, col_sel2, col_sel3 = st.columns([1, 1, 2])
+    
+    with col_sel1:
+        select_all = st.checkbox("Selectează toate produsele vizibile", key="apex_exclude_select_all")
+    
+    with col_sel2:
+        if st.button("Resetează selecția"):
+            st.session_state.apex_exclude_selected = set()
+            st.rerun()
+    
+    # Aplică select all (în memorie, nu în DB)
+    if select_all:
+        st.session_state.apex_exclude_selected = set(all_codes_current)
+    
+    # Multiselect pentru alegere individuală
+    current_selected_list = [c for c in all_codes_current if c in st.session_state.apex_exclude_selected]
+    new_selected = st.multiselect(
+        "Selectează produse de exclus permanent (nu vor mai apărea la următoarele importuri):",
+        options=all_codes_current,
+        default=current_selected_list,
+        key="apex_exclude_multiselect",
+        help="Produsele selectate vor fi salvate în lista de ignorare și eliminate din toate procesările viitoare"
+    )
+    
+    # Sincronizează selecția în session_state
+    st.session_state.apex_exclude_selected = set(new_selected)
+    
+    col_action1, col_action2 = st.columns([2, 2])
+    
+    with col_action1:
+        if st.button("💾 Salvează în lista de excluderi", type="primary", use_container_width=True):
+            to_save = sorted(st.session_state.apex_exclude_selected)
+            if save_apex_exclude_codes(to_save):
+                st.session_state.apex_exclude_selected = set()
+                st.rerun()
+    
+    with col_action2:
+        # Buton pentru a vizualiza produsele deja excluse
+        if st.button("👁️ Vezi toate excluderile active", use_container_width=True):
+            st.session_state.show_excluded = not st.session_state.get("show_excluded", False)
+    
+    if st.session_state.get("show_excluded", False) and len(exclude_codes) > 0:
+        st.markdown("##### 🚫 Coduri excluse permanent:")
+        excluded_df = pd.DataFrame({"cod": sorted(list(exclude_codes))})
+        st.dataframe(excluded_df, use_container_width=True)
+        
+        if st.button("🗑️ Șterge toate excluderile"):
+            conn = get_db_connection()
+            if conn:
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("DELETE FROM apex_exclude;")
+                    conn.commit()
+                    st.success("✅ Toate excluderile au fost șterse")
+                    load_apex_exclude_codes.clear()
+                    cursor.close()
+                    conn.close()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Eroare la ștergere: {e}")
+                    if conn:
+                        conn.rollback()
+                        conn.close()
+    
+    # ============================================
+    # BUTOANE ACȚIUNI PRINCIPALE
+    # ============================================
+    st.markdown("---")
     col_a, col_b = st.columns(2)
+    
     with col_a:
         csv_buf = io.StringIO()
         apex_df_normalized.to_csv(csv_buf, index=False, quoting=csv.QUOTE_MINIMAL)
-        st.download_button("⬇️ Descarcă CSV", data=csv_buf.getvalue(), file_name="apex_normalizat.csv", mime="text/csv")
+        st.download_button(
+            "⬇️ Descarcă CSV (produse active)", 
+            data=csv_buf.getvalue(), 
+            file_name="apex_normalizat.csv", 
+            mime="text/csv"
+        )
+    
     with col_b:
         if st.button("💾 Salvează în BD (apex_normalized)", type="primary"):
+            # Salvează DOAR produsele neexcluse
             save_apex_normalized_to_db(apex_df_normalized)
 
 if apex_df_normalized is not None and smartbill_file:

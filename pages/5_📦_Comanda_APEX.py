@@ -302,6 +302,37 @@ def save_apex_exclude_codes(codes: list[str]) -> bool:
 # SALVARE ÎN BD (CORECTATĂ)
 # =========================
 
+
+def delete_apex_exclude_codes(codes: list[str]) -> bool:
+    """Șterge codurile selectate din apex_exclude."""
+    if not codes:
+        st.warning("Nu ai selectat niciun cod pentru ștergere.")
+        return False
+
+    conn = get_db_connection()
+    if not conn:
+        st.error("❌ Nu pot șterge excluderile - lipsește conexiunea DB")
+        return False
+
+    try:
+        cursor = conn.cursor()
+        delete_sql = "DELETE FROM apex_exclude WHERE cod = %s;"
+        cursor.executemany(delete_sql, [(str(c),) for c in codes])
+        deleted_count = cursor.rowcount
+        conn.commit()
+        cursor.close()
+        conn.close()
+        st.success(f"✅ Șterse {deleted_count} coduri din lista de excluderi.")
+        load_apex_exclude_codes.clear()  # Invalidează cache
+        return True
+    except Exception as e:
+        st.error(f"❌ Eroare la ștergere excluderi: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
+        return False
+
+
 def save_apex_normalized_to_db(df: pd.DataFrame) -> bool:
     """
     Salvează datele APEX normalizate în tabelul apex_normalized.
@@ -311,49 +342,99 @@ def save_apex_normalized_to_db(df: pd.DataFrame) -> bool:
     if not conn:
         st.error("❌ Nu pot salva - lipsește conexiunea DB")
         return False
-    
+
     try:
         cursor = conn.cursor()
-        
+
         # 1. Șterge datele existente
         cursor.execute("DELETE FROM apex_normalized;")
         deleted_count = cursor.rowcount
+        conn.commit()
         st.info(f"🗑️ Șterse {deleted_count} înregistrări vechi din apex_normalized")
-        
-        # 2. Insert datele noi
+
+        # 2. Insert datele noi cu progress indicator
         insert_query = """
             INSERT INTO apex_normalized
             (cod_raw, cod, nume_apex, cantitate, pret_eur, pret_lei, order_hint, import_timestamp)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """
-        
+
+        # Pregătim datele - IMPORTANT: folosim valorile deja calculate din DataFrame
         insert_data = []
-        for _, row in df.iterrows():
+        total_rows = len(df)
+
+        # Progress bar pentru pregătire date
+        progress_bar = st.progress(0, text="Pregătire date pentru salvare...")
+
+        for idx, row in df.iterrows():
+            # Extragem valorile direct din DataFrame (deja normalizate)
+            pret_eur_val = row.get("pret_eur", "0")
+            pret_lei_val = row.get("pret_lei", "0")
+
+            # Convertim la float doar la final
+            try:
+                pret_eur_float = float(parse_decimal_maybe(pret_eur_val))
+            except:
+                pret_eur_float = 0.0
+
+            try:
+                pret_lei_float = float(parse_decimal_maybe(pret_lei_val))
+            except:
+                pret_lei_float = 0.0
+
             insert_data.append((
                 str(row.get("cod_raw", "")),
                 str(row.get("cod", "")),
                 str(row.get("nume_apex", "")),
                 str(row.get("cantitate", "")),
-                float(parse_decimal_maybe(row.get("pret_eur", 0))),
-                float(parse_decimal_maybe(row.get("pret_lei", 0))),
+                pret_eur_float,
+                pret_lei_float,
                 str(row.get("order_hint", "")),
                 datetime.now()
             ))
-        
-        cursor.executemany(insert_query, insert_data)
-        conn.commit()
+
+            # Update progress la fiecare 10% sau la ultimul rând
+            if (idx + 1) % max(1, total_rows // 10) == 0 or idx == total_rows - 1:
+                progress_pct = int((idx + 1) / total_rows * 100)
+                progress_bar.progress((idx + 1) / total_rows, 
+                                     text=f"Pregătire date: {idx + 1}/{total_rows} ({progress_pct}%)")
+
+        progress_bar.progress(1.0, text="Date pregătite! ✓")
+
+        # Scriere în batch-uri cu progress indicator
+        st.info("💾 Scriere în baza de date...")
+        write_progress = st.progress(0, text="Salvare în BD...")
+
+        batch_size = 1000  # Scriem câte 1000 de înregistrări odată
+        total_batches = (len(insert_data) + batch_size - 1) // batch_size
+
+        for batch_idx in range(0, len(insert_data), batch_size):
+            batch = insert_data[batch_idx:batch_idx + batch_size]
+            cursor.executemany(insert_query, batch)
+            conn.commit()
+
+            # Update progress
+            current_batch = (batch_idx // batch_size) + 1
+            progress_pct = int(current_batch / total_batches * 100)
+            write_progress.progress(min(current_batch / total_batches, 1.0), 
+                                   text=f"Salvat batch {current_batch}/{total_batches} ({progress_pct}%)")
+
+        write_progress.progress(1.0, text="Salvare completă! ✓")
         st.success(f"✅ Salvate {len(insert_data)} înregistrări noi în apex_normalized")
-        
+
         cursor.close()
         conn.close()
         return True
-        
+
     except Exception as e:
         st.error(f"❌ Eroare la salvare în BD: {e}")
+        import traceback
+        st.error(f"Detalii: {traceback.format_exc()}")
         if conn:
             conn.rollback()
             conn.close()
         return False
+
 
 
 def normalize_apex_columns(df: pd.DataFrame) -> pd.DataFrame:
@@ -532,24 +613,48 @@ if apex_file:
         st.markdown("##### 🚫 Coduri excluse permanent:")
         excluded_df = pd.DataFrame({"cod": sorted(list(exclude_codes))})
         st.dataframe(excluded_df, use_container_width=True)
-        
-        if st.button("🗑️ Șterge toate excluderile"):
-            conn = get_db_connection()
-            if conn:
-                try:
-                    cursor = conn.cursor()
-                    cursor.execute("DELETE FROM apex_exclude;")
-                    conn.commit()
-                    st.success("✅ Toate excluderile au fost șterse")
-                    load_apex_exclude_codes.clear()
-                    cursor.close()
-                    conn.close()
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Eroare la ștergere: {e}")
-                    if conn:
-                        conn.rollback()
+
+        # UI pentru ștergere selectivă sau completă
+        st.markdown("**Opțiuni de ștergere:**")
+        col_del1, col_del2 = st.columns(2)
+
+        with col_del1:
+            # Multiselect pentru ștergere selectivă
+            codes_to_delete = st.multiselect(
+                "Selectează coduri de șters din excluderi:",
+                options=sorted(list(exclude_codes)),
+                key="delete_exclude_multiselect",
+                help="Selectează codurile pe care vrei să le scoți din lista de excluderi"
+            )
+
+            if st.button("🗑️ Șterge codurile selectate", use_container_width=True):
+                if codes_to_delete:
+                    if delete_apex_exclude_codes(codes_to_delete):
+                        st.rerun()
+                else:
+                    st.warning("Selectează cel puțin un cod pentru ștergere")
+
+        with col_del2:
+            st.write("")  # Spacing
+            st.write("")  # Spacing
+            # Buton pentru ștergere totală
+            if st.button("🗑️ Șterge TOATE excluderile", type="secondary", use_container_width=True):
+                conn = get_db_connection()
+                if conn:
+                    try:
+                        cursor = conn.cursor()
+                        cursor.execute("DELETE FROM apex_exclude;")
+                        conn.commit()
+                        st.success("✅ Toate excluderile au fost șterse")
+                        load_apex_exclude_codes.clear()
+                        cursor.close()
                         conn.close()
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"❌ Eroare la ștergere: {e}")
+                        if conn:
+                            conn.rollback()
+                            conn.close()
     
     # ============================================
     # BUTOANE ACȚIUNI PRINCIPALE

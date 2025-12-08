@@ -896,6 +896,7 @@ page = st.sidebar.radio(
         "💰 Oportunități Profit",
         "📊 Stocuri Critice",
         "🛒 Coș Foneday",
+        "📊 Comparare APEX",
         "🗺️ Mapări",
         "📝 Log"
     ]
@@ -1268,6 +1269,120 @@ elif page == "🗺️ Mapări":
             conn.close()
     except Exception as e:
         st.error(f"Eroare: {e}")
+elif page == "📊 Comparare APEX":
+    st.title("📊 Comparare prețuri Foneday vs APEX")
+    st.markdown(
+        "Produse din `foneday_inventory` (rezultatul Pasului 3) "
+        "comparate cu prețurile din `apex_normalized` (coloana `cod`)."
+    )
+
+    try:
+        conn = get_db_connection()
+        if not conn:
+            st.error("❌ Nu pot conecta la baza de date.")
+        else:
+            cursor = conn.cursor()
+
+            # 1. Produse disponibile la Foneday (din PASUL 3) + numele tău de produs
+            cursor.execute("""
+                SELECT fi.product_id,
+                       fi.sku              AS my_sku,
+                       p.name              AS product_name,
+                       fi.foneday_sku,
+                       fi.price_eur        AS foneday_price_eur
+                FROM public.foneday_inventory fi
+                LEFT JOIN product_sku ps
+                       ON fi.sku = ps.sku AND ps.is_primary = TRUE
+                LEFT JOIN product p
+                       ON ps.product_id = p.id
+                WHERE fi.instock = TRUE
+            """)
+            rows = cursor.fetchall()
+
+            if not rows:
+                st.info("Nu există produse disponibile în `foneday_inventory`. Rulează mai întâi PASUL 3.")
+                cursor.close()
+                conn.close()
+            else:
+                df_foneday = pd.DataFrame(
+                    rows,
+                    columns=["product_id", "sku", "product_name", "foneday_sku", "foneday_price_eur"]
+                )
+
+                # 2. Prețurile APEX pentru aceleași SKU-uri (cod = SKU)
+                cursor.execute("""
+                    SELECT an.cod        AS sku,
+                           an.pret_eur  AS apex_price_eur,
+                           an.nume_apex
+                    FROM public.apex_normalized an
+                    WHERE an.cod IS NOT NULL
+                      AND an.cod IN (
+                          SELECT DISTINCT sku
+                          FROM public.foneday_inventory
+                          WHERE instock = TRUE
+                      )
+                """)
+                apex_rows = cursor.fetchall()
+                cursor.close()
+                conn.close()
+
+                df_apex = pd.DataFrame(apex_rows, columns=["sku", "apex_price_eur", "nume_apex"])
+
+                # 3. Join Foneday + APEX pe SKU
+                df = df_foneday.merge(df_apex, on="sku", how="left")
+
+                # 4. Calcul diferențe de preț
+                df["diff_eur"] = df["apex_price_eur"] - df["foneday_price_eur"]
+
+                def cheaper(row):
+                    if pd.isnull(row["apex_price_eur"]):
+                        return "Doar Foneday"
+                    if row["foneday_price_eur"] < row["apex_price_eur"]:
+                        return "Foneday"
+                    if row["apex_price_eur"] < row["foneday_price_eur"]:
+                        return "APEX"
+                    return "Egal"
+
+                df["cheaper_source"] = df.apply(cheaper, axis=1)
+
+                st.info(f"Găsite {len(df)} produse în `foneday_inventory` pentru comparație.")
+
+                # 5. Filtre UI
+                col1, col2 = st.columns(2)
+                with col1:
+                    show_only_with_apex = st.checkbox("Doar produse care există și în APEX", value=True)
+                with col2:
+                    cheaper_choice = st.selectbox(
+                        "Filtru după sursa mai ieftină",
+                        ["Toate", "Foneday mai ieftin", "APEX mai ieftin"]
+                    )
+
+                if show_only_with_apex:
+                    df_view = df[df["apex_price_eur"].notnull()].copy()
+                else:
+                    df_view = df.copy()
+
+                if cheaper_choice == "Foneday mai ieftin":
+                    df_view = df_view[df_view["cheaper_source"] == "Foneday"]
+                elif cheaper_choice == "APEX mai ieftin":
+                    df_view = df_view[df_view["cheaper_source"] == "APEX"]
+
+                # 6. Afișăm tabelul final
+                display_cols = [
+                    "sku",
+                    "product_name",       # numele tău
+                    "nume_apex",          # numele din APEX
+                    "foneday_sku",
+                    "foneday_price_eur",
+                    "apex_price_eur",
+                    "diff_eur",
+                    "cheaper_source",
+                ]
+                st.dataframe(df_view[display_cols], use_container_width=True)
+
+    except Exception as e:
+        st.error(f"Eroare în pagina «Comparare APEX»: {e}")
+        
 
 elif page == "📝 Log":
     st.title("📝 Log Evenimente")

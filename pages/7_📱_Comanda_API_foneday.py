@@ -250,7 +250,7 @@ def compare_prices_with_apex(products_to_order):
     return result
 
 def step4_add_to_cart_with_apex_comparison():
-    """PASUL 4 cu comparare Apex și selecție interactivă"""
+    """PASUL 4 cu comparare Apex - FOLOSEȘTE st.form() pentru a funcționa"""
 
     st.markdown("### 🔄 Identificare produse disponibile")
     progress_bar = st.progress(0)
@@ -342,6 +342,7 @@ def step4_add_to_cart_with_apex_comparison():
         comparison = compare_prices_with_apex(products_for_comparison)
 
         progress_bar.progress(0.6)
+        status_container.empty()
 
         st.markdown("### 📋 Raport Comparare")
 
@@ -432,134 +433,140 @@ def step4_add_to_cart_with_apex_comparison():
             cursor.close()
             return 0, 0
 
-        st.markdown("### 🛒 Selectează produsele pentru comandă")
-        st.info("✅ PRE-SELECTATE = recomandate | ❌ NESELECTATE = mai scump (poți selecta manual)")
-
         df_display = pd.DataFrame(all_products_display)
-
-        # Afișare tabel cu selecție
-        edited_df = st.data_editor(
-            df_display[['selected', 'product_name', 'sku', 'foneday_price', 'apex_price', 'profit_margin', 'status']],
-            column_config={
-                "selected": st.column_config.CheckboxColumn("✓", help="Bifează", default=False),
-                "product_name": "Produs",
-                "sku": "SKU",
-                "foneday_price": "Foneday",
-                "apex_price": "Apex",
-                "profit_margin": "Marjă",
-                "status": "Status"
-            },
-            disabled=['product_name', 'sku', 'foneday_price', 'apex_price', 'profit_margin', 'status'],
-            hide_index=True,
-            use_container_width=True,
-            key='products_selector'
-        )
 
         progress_bar.progress(0.8)
 
-        # Actualizăm df_display cu selecția din editor
-        for idx in edited_df.index:
-            df_display.loc[idx, 'selected'] = edited_df.loc[idx, 'selected']
+        st.markdown("### 🛒 Selectează și plasează comanda")
+        st.info("✅ PRE-SELECTATE = recomandate | ❌ NESELECTATE = mai scump (poți selecta manual)")
 
-        # Statistici
-        selected_count = df_display['selected'].sum()
-        if selected_count > 0:
+        # FOLOSIM st.form() - SINGURA SOLUȚIE CARE FUNCȚIONEAZĂ
+        with st.form("order_form"):
+            st.markdown("**Selectează produsele:**")
+
+            edited_df = st.data_editor(
+                df_display[['selected', 'product_name', 'sku', 'foneday_price', 'apex_price', 'profit_margin', 'status']],
+                column_config={
+                    "selected": st.column_config.CheckboxColumn("✓", help="Bifează", default=False),
+                    "product_name": "Produs",
+                    "sku": "SKU",
+                    "foneday_price": "Foneday",
+                    "apex_price": "Apex",
+                    "profit_margin": "Marjă",
+                    "status": "Status"
+                },
+                disabled=['product_name', 'sku', 'foneday_price', 'apex_price', 'profit_margin', 'status'],
+                hide_index=True,
+                use_container_width=True,
+                key='order_products'
+            )
+
+            # Actualizăm df_display cu selecțiile
+            for idx in edited_df.index:
+                df_display.loc[idx, 'selected'] = edited_df.loc[idx, 'selected']
+
+            # Calculăm totale
+            selected_count = df_display['selected'].sum()
+            if selected_count > 0:
+                selected_indices = df_display[df_display['selected'] == True].index
+                total_eur = sum(df_display.loc[i, 'foneday_price_raw'] * 2 for i in selected_indices)
+
+                st.markdown("---")
+                col_s1, col_s2, col_s3 = st.columns(3)
+                with col_s1:
+                    st.metric("📦 Selectate", int(selected_count))
+                with col_s2:
+                    st.metric("💶 Total", f"€{total_eur:.2f}")
+                with col_s3:
+                    st.metric("📊 Bucăți", int(selected_count * 2))
+
+            # BUTON SUBMIT ÎN FORM
+            submit_button = st.form_submit_button(
+                "🚀 PLASEAZĂ COMANDA LA FONEDAY",
+                type="primary",
+                use_container_width=True
+            )
+
+        # PROCESARE COMANDĂ - se execută când submit_button = True
+        if submit_button:
             selected_indices = df_display[df_display['selected'] == True].index
-            total_eur = sum(df_display.loc[i, 'foneday_price_raw'] * 2 for i in selected_indices)
 
-            st.markdown("---")
-            col_s1, col_s2, col_s3 = st.columns(3)
-            with col_s1:
-                st.metric("📦 Selectate", int(selected_count))
-            with col_s2:
-                st.metric("💶 Total", f"€{total_eur:.2f}")
-            with col_s3:
-                st.metric("📊 Bucăți", int(selected_count * 2))
-        else:
-            total_eur = 0
-
-        st.markdown("### 📦 Plasare comandă")
-
-        # BUTON - execuție DIRECTĂ când e apăsat
-        if st.button("🚀 PLASEAZĂ COMANDA LA FONEDAY", type="primary", use_container_width=True, disabled=(selected_count==0)):
-            # Execută IMEDIAT comanda
-            selected_indices = df_display[df_display['selected'] == True].index
-
-            st.markdown("---")
-            st.markdown("### 🔄 Procesare comandă...")
-
-            added = 0
-            errors = 0
-
-            order_prog = st.progress(0)
-            order_stat = st.empty()
-
-            for idx, sel_idx in enumerate(selected_indices):
-                prod = df_display.loc[sel_idx]
-
-                order_stat.info(f"📦 Procesez {idx+1}/{len(selected_indices)}: {prod['product_name']}")
-
-                # APEL API REAL FONEDAY
-                try:
-                    cart_result = add_to_foneday_cart(prod['foneday_sku'], 2, f"Auto - {prod['sku']}")
-
-                    if cart_result:
-                        # Salvează în DB
-                        cursor.execute("""
-                            INSERT INTO public.foneday_cart
-                            (product_id, sku, foneday_sku, quantity, price_eur, woo_price_ron,
-                            profit_margin, is_profitable, status, note)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (
-                            prod['product_id'], prod['sku'], prod['foneday_sku'], 2,
-                            prod['foneday_price_raw'], prod['woo_price_raw'],
-                            float(prod['profit_margin'].rstrip('%')), True, 'added_to_cart',
-                            f"{prod['status']} - 2 buc"
-                        ))
-                        conn.commit()
-                        added += 1
-                        log_event("step4_apex_add", f"✅ Adăugat: {prod['sku']}", sku=prod['sku'], status="success")
-                    else:
-                        errors += 1
-                        log_event("step4_apex_error", f"❌ API nu a răspuns pentru {prod['sku']}", sku=prod['sku'], status="error")
-
-                except Exception as e:
-                    conn.rollback()
-                    errors += 1
-                    log_event("step4_apex_error", f"❌ Eroare: {str(e)}", sku=prod['sku'], status="error")
-                    st.warning(f"⚠️ Eroare la {prod['sku']}: {str(e)}")
-
-                order_prog.progress((idx + 1) / len(selected_indices))
-                time.sleep(0.3)
-
-            order_stat.empty()
-            order_prog.progress(1.0)
-
-            st.markdown("---")
-
-            if added > 0:
-                st.success(f"""
-                ✅ **COMANDĂ PLASATĂ CU SUCCES!**
-
-                - 🛒 **{added} produse** adăugate în coșul Foneday
-                - 💶 **Total: €{total_eur:.2f}** ({added * 2} bucăți)
-                - ⚠️ **{errors} erori**
-
-                🌐 [Verifică coșul pe Foneday](https://foneday.shop)
-                """)
-                st.balloons()
-                log_event("step4_apex_complete", f"✅ Succes: {added} produse, {errors} erori", status="success")
+            if len(selected_indices) == 0:
+                st.error("⚠️ Nu ai selectat niciun produs!")
             else:
-                st.error(f"""
-                ❌ **EROARE LA PLASARE COMANDĂ**
+                total_eur = sum(df_display.loc[i, 'foneday_price_raw'] * 2 for i in selected_indices)
 
-                - Nu s-a putut adăuga niciun produs
-                - {errors} erori înregistrate
-                - Verifică log-urile pentru detalii
-                """)
+                st.markdown("---")
+                st.markdown("### 🔄 Procesare comandă în curs...")
 
-            cursor.close()
-            return added, errors
+                added = 0
+                errors = 0
+
+                order_prog = st.progress(0)
+                order_stat = st.empty()
+
+                for idx, sel_idx in enumerate(selected_indices):
+                    prod = df_display.loc[sel_idx]
+
+                    order_stat.info(f"📦 Procesez {idx+1}/{len(selected_indices)}: {prod['product_name']}")
+
+                    try:
+                        # APEL API FONEDAY
+                        cart_result = add_to_foneday_cart(prod['foneday_sku'], 2, f"Auto - {prod['sku']}")
+
+                        if cart_result:
+                            cursor.execute("""
+                                INSERT INTO public.foneday_cart
+                                (product_id, sku, foneday_sku, quantity, price_eur, woo_price_ron,
+                                profit_margin, is_profitable, status, note)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            """, (
+                                prod['product_id'], prod['sku'], prod['foneday_sku'], 2,
+                                prod['foneday_price_raw'], prod['woo_price_raw'],
+                                float(prod['profit_margin'].rstrip('%')), True, 'added_to_cart',
+                                f"{prod['status']} - 2 buc"
+                            ))
+                            conn.commit()
+                            added += 1
+                            log_event("step4_apex_add", f"✅ {prod['sku']}", sku=prod['sku'], status="success")
+                        else:
+                            errors += 1
+                            log_event("step4_apex_error", f"❌ API error {prod['sku']}", sku=prod['sku'], status="error")
+
+                    except Exception as e:
+                        conn.rollback()
+                        errors += 1
+                        log_event("step4_apex_error", f"❌ {str(e)}", sku=prod['sku'], status="error")
+                        st.warning(f"⚠️ Eroare: {prod['sku']}")
+
+                    order_prog.progress((idx + 1) / len(selected_indices))
+                    time.sleep(0.3)
+
+                order_stat.empty()
+                order_prog.progress(1.0)
+
+                st.markdown("---")
+
+                if added > 0:
+                    st.success(f"""
+                    ✅ **COMANDĂ PLASATĂ CU SUCCES!**
+
+                    - 🛒 **{added} produse** adăugate în coșul Foneday
+                    - 💶 **Total: €{total_eur:.2f}** ({added * 2} bucăți)
+                    - ⚠️ **{errors} erori**
+
+                    🌐 [Verifică coșul Foneday →](https://foneday.shop)
+                    """)
+                    st.balloons()
+                    log_event("step4_apex_complete", f"✅ {added} produse, {errors} erori", status="success")
+                else:
+                    st.error(f"""
+                    ❌ **EROARE LA PLASARE**
+
+                    - 0 produse adăugate
+                    - {errors} erori
+                    - Verifică log-urile
+                    """)
 
         cursor.close()
         progress_bar.progress(1.0)

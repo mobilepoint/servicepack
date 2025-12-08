@@ -1564,15 +1564,22 @@ elif page == "🔄 Import Individual (Pași)":
             step3_check_stock_and_prices()
     
     with tab4:
-        st.markdown("### DEBUG BUTON SIMPLU")
+     st.header("🛒 TEST PAS 4 - DEBUG")
 
-        if st.button("TEST BUTON", key="debug_test_button"):
-            st.success("BUTONUL FUNCȚIONEAZĂ - AM INTRAT ÎN IF")
+     if st.button("TRIMITE COMANDĂ DE TEST", key="debug_order_button"):
+        st.write("Am intrat în IF – testăm API Foneday...")
 
-        st.markdown("## 🛒 PASUL 4: Adăugare Automată în Coș")
-        st.info("Calculează profitabilitatea și adaugă produsele profitabile în coșul Foneday (2 buc)")
-        if st.button("▶️ Rulează Pasul 4", type="primary", use_container_width=True):
-            step4_add_to_cart_with_apex_comparison()
+        # AICI pune un SKU Foneday VALID, cunoscut de tine
+        test_foneday_sku = "ZH13T5B72B"
+
+        result = add_to_foneday_cart(test_foneday_sku, 1, "DEBUG TEST")
+        st.write("Răspuns API:", result)
+
+        if result:
+            st.success("API Foneday A RĂSPUNS – cererea a plecat.")
+        else:
+            st.error("API Foneday NU a răspuns sau a dat eroare.")
+
 
 elif page == "💰 Oportunități Profit":
     st.title("💰 Oportunități de Profit")

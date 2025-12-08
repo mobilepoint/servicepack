@@ -57,9 +57,8 @@ st.caption("Normalizare APEX → Salvare BD → Mapare catalog → Raport comenz
 # =========================
 # CONEXIUNE DATABASE (ca în celelalte pagini)
 # =========================
-@st.cache_resource
 def get_db_connection():
-    """Obține conexiunea la PostgreSQL din secrets"""
+    """Obține o conexiune NOUĂ la PostgreSQL"""
     try:
         pg_url = st.secrets["connections"]["postgresql"]["url"]
         conn = psycopg2.connect(pg_url, connect_timeout=10)
@@ -217,7 +216,7 @@ def load_sku_mapping_from_db() -> pd.DataFrame:
     conn = get_db_connection()
     if not conn:
         return pd.DataFrame(columns=["sku_any", "primary_sku", "denumire_db"])
-
+    
     try:
         query = "SELECT sku_any, primary_sku, denumire_db FROM v_sku_mapping;"
         df = pd.read_sql(query, conn)
@@ -228,6 +227,51 @@ def load_sku_mapping_from_db() -> pd.DataFrame:
         return pd.DataFrame(columns=["sku_any", "primary_sku", "denumire_db"])
     finally:
         conn.close()
+def save_apex_normalized_to_db(df: pd.DataFrame):
+    """Salvează datele APEX normalizate în tabelul apex_normalized."""
+    conn = get_db_connection()
+    if not conn:
+        st.error("❌ Nu pot salva - lipsește conexiunea DB")
+        return False
+    
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM apex_normalized;")
+        deleted_count = cursor.rowcount
+        st.info(f"🗑️ Șterse {deleted_count} înregistrări vechi din apex_normalized")
+        
+        insert_query = """
+            INSERT INTO apex_normalized
+            (cod_raw, cod, nume_apex, cantitate, pret_eur, pret_lei, order_hint, import_timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """
+        
+        insert_data = [
+            (
+                str(row.get("cod_raw", "")),
+                str(row.get("cod", "")),
+                str(row.get("nume_apex", "")),
+                str(row.get("cantitate", "")),
+                float(parse_decimal_maybe(row.get("pret_eur", 0))),
+                float(parse_decimal_maybe(row.get("pret_lei", 0))),
+                str(row.get("order_hint", "")),
+                datetime.now()
+            )
+            for _, row in df.iterrows()
+        ]
+        
+        cursor.executemany(insert_query, insert_data)
+        conn.commit()
+        st.success(f"✅ Salvate {len(insert_data)} înregistrări noi în apex_normalized")
+        cursor.close()
+        conn.close()
+        return True
+    except Exception as e:
+        st.error(f"❌ Eroare la salvare în BD: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
+        return False
 
 def read_any_apex(file) -> pd.DataFrame:
     """Citește APEX (xlsx/xls/csv). Dacă e Excel, procesează TOATE foile."""
@@ -362,6 +406,59 @@ def save_apex_exclude_codes(codes: list[str]) -> bool:
         
         # invalidează cache-ul
         load_apex_exclude_codes.clear()
+        return True
+    except Exception as e:
+        st.error(f"❌ Eroare la salvare excluderi: {e}")
+        if conn:
+            conn.rollback()
+            conn.close()
+        return False
+# =========================
+# FUNCȚII EXCLUDERI
+# =========================
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_apex_exclude_codes() -> set[str]:
+    """Încarcă lista de coduri excluse din tabelul apex_exclude."""
+    conn = get_db_connection()
+    if not conn:
+        return set()
+    
+    try:
+        df = pd.read_sql("SELECT cod FROM apex_exclude;", conn)
+        return set(df["cod"].astype(str).str.strip())
+    except Exception as e:
+        st.error(f"❌ Eroare la citire apex_exclude: {e}")
+        return set()
+    finally:
+        conn.close()
+
+
+def save_apex_exclude_codes(codes: list[str]) -> bool:
+    """Salvează codurile selectate în apex_exclude (batch insert)."""
+    if not codes:
+        st.warning("Nu ai selectat niciun produs pentru excludere.")
+        return False
+    
+    conn = get_db_connection()
+    if not conn:
+        st.error("❌ Nu pot salva excluderile - lipsește conexiunea DB")
+        return False
+    
+    try:
+        cursor = conn.cursor()
+        insert_sql = """
+            INSERT INTO apex_exclude (cod)
+            VALUES (%s)
+            ON CONFLICT (cod) DO NOTHING;
+        """
+        cursor.executemany(insert_sql, [(str(c),) for c in codes])
+        conn.commit()
+        cursor.close()
+        conn.close()
+        
+        st.success(f"✅ Salvate {len(set(codes))} coduri în lista de excluderi.")
+        load_apex_exclude_codes.clear()  # Invalidează cache
         return True
     except Exception as e:
         st.error(f"❌ Eroare la salvare excluderi: {e}")

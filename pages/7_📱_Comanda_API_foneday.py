@@ -1564,6 +1564,11 @@ elif page == "🔄 Import Individual (Pași)":
             step3_check_stock_and_prices()
     
     with tab4:
+        st.markdown("### DEBUG BUTON SIMPLU")
+
+        if st.button("TEST BUTON", key="debug_test_button"):
+        st.success("BUTONUL FUNCȚIONEAZĂ - AM INTRAT ÎN IF")
+
         st.markdown("## 🛒 PASUL 4: Adăugare Automată în Coș")
         st.info("Calculează profitabilitatea și adaugă produsele profitabile în coșul Foneday (2 buc)")
         if st.button("▶️ Rulează Pasul 4", type="primary", use_container_width=True):

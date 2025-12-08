@@ -1461,7 +1461,6 @@ elif page == "📊 Comparare APEX":
                         conn = get_db_connection()
                         if not conn:
                             st.error("❌ Nu pot reconecta la baza de date pentru salvarea în coș.")
-                            return
                         cursor = conn.cursor()
 
                         progress = st.progress(0)

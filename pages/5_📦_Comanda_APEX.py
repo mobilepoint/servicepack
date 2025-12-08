@@ -338,9 +338,12 @@ def save_apex_exclude_codes(codes: list[str]) -> bool:
         st.warning("Nu ai selectat niciun produs pentru excludere.")
         return False
 
-    conn = get_db_connection()
-    if not conn:
-        st.error("❌ Nu pot salva excluderile - lipsește conexiunea DB")
+    # Creează conexiune NOUĂ (nu cached)
+    try:
+        pg_url = st.secrets["connections"]["postgresql"]["url"]
+        conn = psycopg2.connect(pg_url, connect_timeout=10)
+    except Exception as e:
+        st.error(f"❌ Nu pot conecta la DB: {e}")
         return False
 
     try:
@@ -350,13 +353,14 @@ def save_apex_exclude_codes(codes: list[str]) -> bool:
             VALUES (%s)
             ON CONFLICT (cod) DO NOTHING;
         """
-        data = [(str(c)) for c in codes]
-        cursor.executemany(insert_sql, [(c,) for c in data])
+        cursor.executemany(insert_sql, [(str(c),) for c in codes])
         conn.commit()
-        st.success(f"✅ Salvate {len(set(data))} coduri în lista de excluderi.")
         cursor.close()
-        conn.close()
-        # invalidează cache-ul local
+        conn.close()  # Acum e safe să închizi
+        
+        st.success(f"✅ Salvate {len(set(codes))} coduri în lista de excluderi.")
+        
+        # invalidează cache-ul
         load_apex_exclude_codes.clear()
         return True
     except Exception as e:
@@ -365,6 +369,7 @@ def save_apex_exclude_codes(codes: list[str]) -> bool:
             conn.rollback()
             conn.close()
         return False
+
 
 
 # =========================

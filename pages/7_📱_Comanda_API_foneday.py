@@ -13,8 +13,7 @@ from auth_simple import check_password
 if not check_password():
     st.stop()
 
-# SIDEBAR
-render_sidebar()
+
 
 # ===== CONFIGURARE PAGINĂ =====
 st.set_page_config(

@@ -1269,6 +1269,7 @@ elif page == "🗺️ Mapări":
             conn.close()
     except Exception as e:
         st.error(f"Eroare: {e}")
+        
 elif page == "📊 Comparare APEX":
     st.title("📊 Comparare prețuri Foneday vs APEX")
     st.markdown(
@@ -1541,10 +1542,7 @@ elif page == "📊 Comparare APEX":
 
     except Exception as e:
         st.error(f"Eroare în pagina «Comparare APEX»: {e}")
-
-
-        
-
+      
 elif page == "📝 Log":
     st.title("📝 Log Evenimente")
     

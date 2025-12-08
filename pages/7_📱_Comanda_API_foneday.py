@@ -1567,7 +1567,7 @@ elif page == "🔄 Import Individual (Pași)":
         st.markdown("### DEBUG BUTON SIMPLU")
 
         if st.button("TEST BUTON", key="debug_test_button"):
-        st.success("BUTONUL FUNCȚIONEAZĂ - AM INTRAT ÎN IF")
+            st.success("BUTONUL FUNCȚIONEAZĂ - AM INTRAT ÎN IF")
 
         st.markdown("## 🛒 PASUL 4: Adăugare Automată în Coș")
         st.info("Calculează profitabilitatea și adaugă produsele profitabile în coșul Foneday (2 buc)")

@@ -735,9 +735,7 @@ def step3_check_stock_and_prices():
 def step4_add_to_cart():
     """PASUL 4: Verifică profitabilitate, compară cu APEX, și adaugă în coș doar ce alegi"""
     
-    st.markdown("---")
-    st.markdown("### 🛒 PASUL 4: Verificare profitabilitate + Comparare APEX")
-    
+    conn = None
     try:
         conn = get_db_connection()
         if not conn:
@@ -812,7 +810,7 @@ def step4_add_to_cart():
 
         st.info(f"✅ Găsite {len(df_profitable)} produse profitabile (marjă > {(1-MIN_PROFIT_MARGIN)*100:.0f}%) în Foneday")
 
-        # 3. Prețurile APEX pentru produsele profitabile
+        # 3. Caută prețuri APEX pentru produsele profitabile
         cursor.execute("""
             SELECT an.cod        AS sku,
                    an.pret_eur  AS apex_price_eur
@@ -825,6 +823,10 @@ def step4_add_to_cart():
               )
         """)
         apex_rows = cursor.fetchall()
+        
+        # IMPORTANT: NU închidem cursor și conn aici - le lăsăm deschise pentru buton
+        cursor.close()
+        conn.close()
 
         df_apex = pd.DataFrame(apex_rows, columns=["sku", "apex_price_eur"])
         df_apex["apex_price_eur"] = pd.to_numeric(
@@ -834,8 +836,15 @@ def step4_add_to_cart():
         # 4. Join Foneday + APEX
         df = df_profitable.merge(df_apex, on="sku", how="left")
 
-        # 5. Calcul diferență de preț și marjă Foneday–Woo
-        df["diff_eur"] = df["apex_price_eur"] - df["foneday_price_eur"]
+        # 5. Calcul marjă Foneday-Woo și comparație cu APEX
+        def margin_fw(row):
+            if pd.isnull(row["woo_price_ron"]) or pd.isnull(row["foneday_price_eur"]):
+                return None
+            return calculate_profit_margin(
+                row["foneday_price_eur"], row["woo_price_ron"]
+            )
+
+        df["margin_fw"] = df.apply(margin_fw, axis=1)
 
         def cheaper(row):
             if pd.isnull(row["apex_price_eur"]):
@@ -848,21 +857,14 @@ def step4_add_to_cart():
 
         df["cheaper_source"] = df.apply(cheaper, axis=1)
 
-        def margin_fw(row):
-            if pd.isnull(row["woo_price_ron"]) or pd.isnull(row["foneday_price_eur"]):
-                return None
-            return calculate_profit_margin(
-                row["foneday_price_eur"], row["woo_price_ron"]
-            )
-
-        df["margin_fw"] = df.apply(margin_fw, axis=1)
-
         # 6. PRE-SELECȚIE: bifează automat Foneday < APEX SAU doar Foneday
         df["selected"] = df["cheaper_source"].isin(["Foneday", "Doar Foneday"])
 
-        st.info(f"📊 Comparație cu APEX: {len(df[df['apex_price_eur'].notnull()])} produse găsite în APEX")
+        # 7. Afișare tabel editabil
+        st.markdown("---")
+        st.markdown("### 📊 Produse profitabile - Comparație Foneday vs APEX")
+        st.markdown(f"Bifează produsele pe care vrei să le adaugi în coșul Foneday **(2 buc fiecare)**")
 
-        # 7. Editor cu checkbox "selected"
         display_cols = [
             "selected",
             "sku",
@@ -874,10 +876,10 @@ def step4_add_to_cart():
             "cheaper_source",
         ]
 
-        df_view_editor = df[display_cols].copy()
+        df_view = df[display_cols].copy()
 
         edited = st.data_editor(
-            df_view_editor,
+            df_view,
             column_config={
                 "selected": st.column_config.CheckboxColumn(
                     "✓",
@@ -907,6 +909,7 @@ def step4_add_to_cart():
             suffixes=("", "_orig"),
         )
 
+        # 9. Rezumat selecție
         st.markdown("### 🛒 Rezumat selecție")
         col_a, col_b, col_c = st.columns(3)
         with col_a:
@@ -919,101 +922,101 @@ def step4_add_to_cart():
                 avg_margin = to_send["margin_fw"].mean()
                 st.metric("Marjă medie Foneday-Woo", f"{avg_margin:.2f}%")
 
-        # 9. Buton: trimite în Foneday ce este bifat
+        # 10. Buton: trimite în Foneday ce este bifat
         if not to_send.empty:
             if st.button("🚀 Trimite în coș Foneday produsele selectate", type="primary"):
-                # NU închidem conexiunea aici - o folosim pentru salvare
-                progress = st.progress(0)
-                status = st.empty()
-                added = 0
-                errors = 0
-
-                log_event("step4_start", f"Adăugare în coș: {len(to_send)} produse", status="info")
-
-                for i, row in to_send.reset_index(drop=True).iterrows():
-                    status.info(
-                        f"📦 {i+1}/{len(to_send)} – {row['product_name']} ({row['sku']})"
-                    )
-
-                    woo_price_ron = float(row.get("woo_price_ron", 0) or 0)
-                    profit_margin = (
-                        float(row["margin_fw"])
-                        if row.get("margin_fw") is not None
-                        else calculate_profit_margin(
-                            row["foneday_price_eur"], woo_price_ron
-                        )
-                    )
-
-                    cart_result = add_to_foneday_cart(
-                        row["foneday_sku"],
-                        2,
-                        f"Pasul 4 - {row['sku']} - Marjă: {profit_margin:.1f}%",
-                    )
-
-                    if cart_result:
-                        try:
-                            cursor.execute(
-                                """
-                                INSERT INTO public.foneday_cart
-                                    (product_id, sku, foneday_sku, quantity,
-                                     price_eur, woo_price_ron,
-                                     profit_margin, is_profitable,
-                                     status, note)
-                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                                """,
-                                (
-                                    row.get("product_id"),
-                                    row["sku"],
-                                    row["foneday_sku"],
-                                    2,
-                                    float(row["foneday_price_eur"]),
-                                    woo_price_ron,
-                                    profit_margin,
-                                    True,
-                                    "added_to_cart",
-                                    f"Pasul 4 - Marjă: {profit_margin:.1f}% - 2 buc",
-                                ),
-                            )
-                            conn.commit()
-                            added += 1
-                            log_event("step4_add", f"Adăugat: {row['sku']} - Marjă: {profit_margin:.1f}%", sku=row['sku'], status="success")
-                        except Exception as e:
-                            conn.rollback()
-                            errors += 1
-                            st.warning(f"Eroare salvare în DB pentru {row['sku']}: {e}")
-                            log_event("step4_error", f"Eroare salvare DB {row['sku']}: {e}", sku=row['sku'], status="error")
-                    else:
-                        errors += 1
-                        st.warning(f"Nu s-a putut adăuga în coș: {row['sku']}")
-                        log_event("step4_warning", f"Eroare API Foneday: {row['sku']}", sku=row['sku'], status="warning")
-
-                    progress.progress((i + 1) / len(to_send))
-                    time.sleep(0.1)  # Rate limiting
-
-                status.empty()
-                progress.progress(1.0)
-
-                if added:
-                    st.success(
-                        f"✅ **PASUL 4 FINALIZAT:** {added} produse trimise în coș Foneday. Erori: {errors}."
-                    )
-                    log_event("step4_complete", f"{added} produse adăugate, {errors} erori", status="success")
+                # RECONECTARE la DB când se apasă butonul
+                conn = get_db_connection()
+                if not conn:
+                    st.error("❌ Nu pot reconecta la baza de date pentru salvarea în coș.")
                 else:
-                    st.error(f"❌ Nicio linie nu a fost trimisă. Erori: {errors}.")
-                    log_event("step4_complete", f"Erori: {errors}", status="error")
+                    cursor = conn.cursor()
 
-                cursor.close()
-                conn.close()
-                return added, errors
+                    progress = st.progress(0)
+                    status = st.empty()
+                    added = 0
+                    errors = 0
+
+                    log_event("step4_start", f"Adăugare în coș: {len(to_send)} produse", status="info")
+
+                    for i, row in to_send.reset_index(drop=True).iterrows():
+                        status.info(
+                            f"📦 {i+1}/{len(to_send)} – {row['product_name']} ({row['sku']})"
+                        )
+
+                        woo_price_ron = float(row.get("woo_price_ron", 0) or 0)
+                        profit_margin = (
+                            float(row["margin_fw"])
+                            if row.get("margin_fw") is not None
+                            else calculate_profit_margin(
+                                row["foneday_price_eur"], woo_price_ron
+                            )
+                        )
+
+                        cart_result = add_to_foneday_cart(
+                            row["foneday_sku"],
+                            2,
+                            f"Pasul 4 - {row['sku']} - Marjă: {profit_margin:.1f}%",
+                        )
+
+                        if cart_result:
+                            try:
+                                cursor.execute(
+                                    """
+                                    INSERT INTO public.foneday_cart
+                                        (product_id, sku, foneday_sku, quantity,
+                                         price_eur, woo_price_ron,
+                                         profit_margin, is_profitable,
+                                         status, note)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                    """,
+                                    (
+                                        row.get("product_id"),
+                                        row["sku"],
+                                        row["foneday_sku"],
+                                        2,
+                                        float(row["foneday_price_eur"]),
+                                        woo_price_ron,
+                                        profit_margin,
+                                        True,
+                                        "added_to_cart",
+                                        f"Pasul 4 - Marjă: {profit_margin:.1f}% - 2 buc",
+                                    ),
+                                )
+                                conn.commit()
+                                added += 1
+                                log_event("step4_add", f"Adăugat: {row['sku']} - Marjă: {profit_margin:.1f}%", sku=row['sku'], status="success")
+                            except Exception as e:
+                                conn.rollback()
+                                errors += 1
+                                st.warning(f"Eroare salvare în DB pentru {row['sku']}: {e}")
+                                log_event("step4_error", f"Eroare salvare DB {row['sku']}: {e}", sku=row['sku'], status="error")
+                        else:
+                            errors += 1
+                            st.warning(f"Nu s-a putut adăuga în coș: {row['sku']}")
+                            log_event("step4_warning", f"Eroare API Foneday: {row['sku']}", sku=row['sku'], status="warning")
+
+                        progress.progress((i + 1) / len(to_send))
+
+                    status.empty()
+                    progress.progress(1.0)
+
+                    if added:
+                        st.success(
+                            f"✅ Trimise în coș Foneday {added} produse. Erori: {errors}."
+                        )
+                        log_event("step4_complete", f"{added} produse adăugate, {errors} erori", status="success")
+                    else:
+                        st.error(f"❌ Nicio linie nu a fost trimisă. Erori: {errors}.")
+                        log_event("step4_complete", f"Erori: {errors}", status="error")
+
+                    cursor.close()
+                    conn.close()
         else:
             st.info("Nu este niciun produs selectat pentru trimitere în Foneday.")
             log_event("step4_complete", "Nu există produse selectate", status="info")
-            cursor.close()
-            conn.close()
 
-        # Dacă nu s-a apăsat butonul, conexiunea rămâne deschisă pentru pagină
-        # Nu închidem aici pentru că Streamlit va reîncărca pagina
-        return 0, 0
+        return len(to_send) if not to_send.empty else 0, 0
 
     except Exception as e:
         error_msg = f"Eroare PASUL 4: {e}"
@@ -1021,9 +1024,11 @@ def step4_add_to_cart():
         log_event("step4_error", error_msg, status="error")
         import traceback
         st.code(traceback.format_exc())
-        if conn:
-            conn.close()
         return 0, 0
+    finally:
+        # Cleanup final doar dacă conexiunea nu a fost închisă în buton
+        pass
+
 
 
 # ===== SIDEBAR =====

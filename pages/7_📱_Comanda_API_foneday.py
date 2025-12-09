@@ -1294,14 +1294,14 @@ elif page == "🔄 Import Individual (Pași)":
             step3_check_stock_and_prices()
     
     with tab4:
-    st.markdown("## 🛒 PASUL 4: Adăugare Automată în Coș")
-    st.info(
+        st.markdown("## 🛒 PASUL 4: Adăugare Automată în Coș")
+        st.info(
         "Calculează profitabilitatea, compară cu APEX și îți arată un tabel de selecție. "
         "Doar produsele bifate vor fi trimise în coșul Foneday (2 buc/produs)."
-    )
+        )
 
     # rulăm direct pasul 4; confirmarea se face din butonul „🚀 Trimite în coș…”
-    step4_add_to_cart()
+        step4_add_to_cart()
 
 
 elif page == "💰 Oportunități Profit":

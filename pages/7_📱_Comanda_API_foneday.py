@@ -735,7 +735,9 @@ def step3_check_stock_and_prices():
 def step4_add_to_cart():
     """PASUL 4: Verifică profitabilitate, compară cu APEX, și adaugă în coș doar ce alegi"""
     
-    conn = None
+    st.markdown("---")
+    st.markdown("### 🛒 PASUL 4: Verificare profitabilitate + Comparare APEX")
+    
     try:
         conn = get_db_connection()
         if not conn:
@@ -767,6 +769,7 @@ def step4_add_to_cart():
             st.info("Nu există produse disponibile în `foneday_inventory`. Rulează mai întâi PASUL 3!")
             log_event("step4_complete", "Nu există produse disponibile", status="info")
             cursor.close()
+            conn.close()
             return 0, 0
 
         df_foneday = pd.DataFrame(
@@ -804,11 +807,12 @@ def step4_add_to_cart():
             st.warning(f"⚠️ Nu există produse profitabile (marjă > {(1-MIN_PROFIT_MARGIN)*100:.0f}%)")
             log_event("step4_complete", "Nu există produse profitabile", status="warning")
             cursor.close()
+            conn.close()
             return 0, 0
 
         st.info(f"✅ Găsite {len(df_profitable)} produse profitabile (marjă > {(1-MIN_PROFIT_MARGIN)*100:.0f}%) în Foneday")
 
-        # 3. Caută prețuri APEX pentru produsele profitabile
+        # 3. Prețurile APEX pentru produsele profitabile
         cursor.execute("""
             SELECT an.cod        AS sku,
                    an.pret_eur  AS apex_price_eur
@@ -830,15 +834,8 @@ def step4_add_to_cart():
         # 4. Join Foneday + APEX
         df = df_profitable.merge(df_apex, on="sku", how="left")
 
-        # 5. Calcul marjă Foneday-Woo și comparație cu APEX
-        def margin_fw(row):
-            if pd.isnull(row["woo_price_ron"]) or pd.isnull(row["foneday_price_eur"]):
-                return None
-            return calculate_profit_margin(
-                row["foneday_price_eur"], row["woo_price_ron"]
-            )
-
-        df["margin_fw"] = df.apply(margin_fw, axis=1)
+        # 5. Calcul diferență de preț și marjă Foneday–Woo
+        df["diff_eur"] = df["apex_price_eur"] - df["foneday_price_eur"]
 
         def cheaper(row):
             if pd.isnull(row["apex_price_eur"]):
@@ -851,14 +848,21 @@ def step4_add_to_cart():
 
         df["cheaper_source"] = df.apply(cheaper, axis=1)
 
+        def margin_fw(row):
+            if pd.isnull(row["woo_price_ron"]) or pd.isnull(row["foneday_price_eur"]):
+                return None
+            return calculate_profit_margin(
+                row["foneday_price_eur"], row["woo_price_ron"]
+            )
+
+        df["margin_fw"] = df.apply(margin_fw, axis=1)
+
         # 6. PRE-SELECȚIE: bifează automat Foneday < APEX SAU doar Foneday
         df["selected"] = df["cheaper_source"].isin(["Foneday", "Doar Foneday"])
 
-        # 7. Afișare tabel editabil
-        st.markdown("---")
-        st.markdown("### 📊 Produse profitabile - Comparație Foneday vs APEX")
-        st.markdown(f"Bifează produsele pe care vrei să le adaugi în coșul Foneday **(2 buc fiecare)**")
+        st.info(f"📊 Comparație cu APEX: {len(df[df['apex_price_eur'].notnull()])} produse găsite în APEX")
 
+        # 7. Editor cu checkbox "selected"
         display_cols = [
             "selected",
             "sku",
@@ -870,10 +874,10 @@ def step4_add_to_cart():
             "cheaper_source",
         ]
 
-        df_view = df[display_cols].copy()
+        df_view_editor = df[display_cols].copy()
 
         edited = st.data_editor(
-            df_view,
+            df_view_editor,
             column_config={
                 "selected": st.column_config.CheckboxColumn(
                     "✓",
@@ -903,7 +907,6 @@ def step4_add_to_cart():
             suffixes=("", "_orig"),
         )
 
-        # 9. Rezumat selecție
         st.markdown("### 🛒 Rezumat selecție")
         col_a, col_b, col_c = st.columns(3)
         with col_a:
@@ -916,9 +919,10 @@ def step4_add_to_cart():
                 avg_margin = to_send["margin_fw"].mean()
                 st.metric("Marjă medie Foneday-Woo", f"{avg_margin:.2f}%")
 
-        # 10. Buton: trimite în Foneday ce este bifat
+        # 9. Buton: trimite în Foneday ce este bifat
         if not to_send.empty:
             if st.button("🚀 Trimite în coș Foneday produsele selectate", type="primary"):
+                # NU închidem conexiunea aici - o folosim pentru salvare
                 progress = st.progress(0)
                 status = st.empty()
                 added = 0
@@ -976,9 +980,11 @@ def step4_add_to_cart():
                         except Exception as e:
                             conn.rollback()
                             errors += 1
+                            st.warning(f"Eroare salvare în DB pentru {row['sku']}: {e}")
                             log_event("step4_error", f"Eroare salvare DB {row['sku']}: {e}", sku=row['sku'], status="error")
                     else:
                         errors += 1
+                        st.warning(f"Nu s-a putut adăuga în coș: {row['sku']}")
                         log_event("step4_warning", f"Eroare API Foneday: {row['sku']}", sku=row['sku'], status="warning")
 
                     progress.progress((i + 1) / len(to_send))
@@ -997,11 +1003,17 @@ def step4_add_to_cart():
                     log_event("step4_complete", f"Erori: {errors}", status="error")
 
                 cursor.close()
+                conn.close()
+                return added, errors
         else:
             st.info("Nu este niciun produs selectat pentru trimitere în Foneday.")
             log_event("step4_complete", "Nu există produse selectate", status="info")
+            cursor.close()
+            conn.close()
 
-        return len(to_send) if not to_send.empty else 0, 0
+        # Dacă nu s-a apăsat butonul, conexiunea rămâne deschisă pentru pagină
+        # Nu închidem aici pentru că Streamlit va reîncărca pagina
+        return 0, 0
 
     except Exception as e:
         error_msg = f"Eroare PASUL 4: {e}"
@@ -1009,11 +1021,9 @@ def step4_add_to_cart():
         log_event("step4_error", error_msg, status="error")
         import traceback
         st.code(traceback.format_exc())
-        return 0, 0
-    finally:
         if conn:
             conn.close()
-
+        return 0, 0
 
 
 # ===== SIDEBAR =====

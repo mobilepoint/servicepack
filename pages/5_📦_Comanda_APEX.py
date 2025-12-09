@@ -1,9 +1,11 @@
-# pages/5_🚚_Comanda_APEX.py
+# pages/5_🚚_Liste_Furnizori.py
+
 """
-Pagina 5: Generator comandă APEX
-- Normalizare fișiere APEX (multi-sheet, auto-header)
-- Salvare date normalizate în BD (pentru comparații prețuri)
+Pagina 5: Generator comenzi furnizori (APEX + GSMNET)
+- Normalizare fișiere furnizori
+- Salvare date în BD pentru comparații prețuri
 - Mapare pe catalog
+- Comparare prețuri și selecție furnizor optim
 - Generare rapoarte
 """
 
@@ -18,7 +20,7 @@ import psycopg2
 from sidebar import render_sidebar
 
 # =========================
-# VERIFICARE AUTENTIFICARE (ca în celelalte pagini)
+# VERIFICARE AUTENTIFICARE
 # =========================
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
@@ -26,7 +28,6 @@ if "authenticated" not in st.session_state:
 if not st.session_state.authenticated:
     st.title("🔒 Autentificare")
     password = st.text_input("Parolă:", type="password")
-
     if st.button("Intră", type="primary"):
         if password == st.secrets.get("password", ""):
             st.session_state.authenticated = True
@@ -38,24 +39,23 @@ if not st.session_state.authenticated:
 # =========================
 # CONFIG & CONSTANTE
 # =========================
-st.set_page_config(page_title="🚚 Comandă APEX", page_icon="🚚", layout="wide")
-
+st.set_page_config(page_title="🚚 Liste Furnizori", page_icon="🚚", layout="wide")
 ALLOWED_ROUNDINGS = [1, 3, 5, 10, 20, 50]
 EUR_TO_RON = Decimal("5.1")
 
 # =========================
-# SIDEBAR (ca în celelalte pagini)
+# SIDEBAR
 # =========================
 render_sidebar()
 
 # =========================
 # HEADER
 # =========================
-st.title("🚚 Generator comenzi APEX")
-st.caption("Normalizare APEX → Salvare BD → Mapare catalog → Raport comenzi")
+st.title("🚚 Generator comenzi furnizori")
+st.caption("Procesare APEX + GSMNET → Comparație prețuri → Selecție furnizor optim")
 
 # =========================
-# CONEXIUNE DATABASE (ca în celelalte pagini)
+# CONEXIUNE DATABASE
 # =========================
 def get_db_connection():
     """Obține o conexiune NOUĂ la PostgreSQL"""
@@ -68,7 +68,7 @@ def get_db_connection():
         return None
 
 # =========================
-# HELPERS (din apex.py original)
+# HELPERS COMUNE
 # =========================
 def round_to_allowed(value: float) -> int:
     for t in ALLOWED_ROUNDINGS:
@@ -150,10 +150,10 @@ def parse_decimal_maybe(val) -> Decimal:
 
 # --------- Soft matching pe headere + auto-promote header row ----------
 HEADER_VARIANTS = {
-    "code": ["product code", "product_code", "code", "cod", "code no", "prod code", "productcode"],
+    "code": ["product code", "product_code", "code", "cod", "code no", "prod code", "productcode", "partnumber"],
     "name": ["product name", "product_name", "name", "nume", "denumire", "description", "descriere"],
-    "qty": ["quantity", "qty", "quant", "q-ty", "qnty"],
-    "eur": ["euro price", "euro pri", "eur price", "euro", "eur", "price(€)", "price €", "€ price", "price eur"],
+    "qty": ["quantity", "qty", "quant", "q-ty", "qnty", "stock"],
+    "eur": ["euro price", "euro pri", "eur price", "euro", "eur", "price(€)", "price €", "€ price", "price eur", "price"],
     "order": ["order", "ord", "order qty", "order_qty", "comanda", "orderhint", "order hint"],
 }
 
@@ -216,7 +216,6 @@ def load_sku_mapping_from_db() -> pd.DataFrame:
     conn = get_db_connection()
     if not conn:
         return pd.DataFrame(columns=["sku_any", "primary_sku", "denumire_db"])
-    
     try:
         query = "SELECT sku_any, primary_sku, denumire_db FROM v_sku_mapping;"
         df = pd.read_sql(query, conn)
@@ -228,7 +227,9 @@ def load_sku_mapping_from_db() -> pd.DataFrame:
     finally:
         conn.close()
 
-
+# =========================
+# FUNCȚII APEX
+# =========================
 def read_any_apex(file) -> pd.DataFrame:
     """Citește APEX (xlsx/xls/csv). Dacă e Excel, procesează TOATE foile."""
     name = (file.name or "").lower()
@@ -247,13 +248,13 @@ def read_any_apex(file) -> pd.DataFrame:
         return pd.DataFrame()
     df_all = pd.concat(frames, ignore_index=True)
     return df_all
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_apex_exclude_codes() -> set[str]:
     """Încarcă lista de coduri excluse din tabelul apex_exclude."""
     conn = get_db_connection()
     if not conn:
         return set()
-    
     try:
         df = pd.read_sql("SELECT cod FROM apex_exclude;", conn)
         return set(df["cod"].astype(str).str.strip())
@@ -263,32 +264,28 @@ def load_apex_exclude_codes() -> set[str]:
     finally:
         conn.close()
 
-
 def save_apex_exclude_codes(codes: list[str]) -> bool:
     """Salvează codurile selectate în apex_exclude (batch insert)."""
     if not codes:
         st.warning("Nu ai selectat niciun produs pentru excludere.")
         return False
-    
     conn = get_db_connection()
     if not conn:
         st.error("❌ Nu pot salva excluderile - lipsește conexiunea DB")
         return False
-    
     try:
         cursor = conn.cursor()
         insert_sql = """
-            INSERT INTO apex_exclude (cod)
-            VALUES (%s)
-            ON CONFLICT (cod) DO NOTHING;
+        INSERT INTO apex_exclude (cod)
+        VALUES (%s)
+        ON CONFLICT (cod) DO NOTHING;
         """
         cursor.executemany(insert_sql, [(str(c),) for c in codes])
         conn.commit()
         cursor.close()
         conn.close()
-        
         st.success(f"✅ Salvate {len(set(codes))} coduri în lista de excluderi.")
-        load_apex_exclude_codes.clear()  # Invalidează cache
+        load_apex_exclude_codes.clear()
         return True
     except Exception as e:
         st.error(f"❌ Eroare la salvare excluderi: {e}")
@@ -302,12 +299,10 @@ def delete_apex_exclude_codes(codes: list[str]) -> bool:
     if not codes:
         st.warning("Nu ai selectat niciun cod pentru ștergere.")
         return False
-
     conn = get_db_connection()
     if not conn:
         st.error("❌ Nu pot șterge excluderile - lipsește conexiunea DB")
         return False
-
     try:
         cursor = conn.cursor()
         delete_sql = "DELETE FROM apex_exclude WHERE cod = %s;"
@@ -317,7 +312,7 @@ def delete_apex_exclude_codes(codes: list[str]) -> bool:
         cursor.close()
         conn.close()
         st.success(f"✅ Șterse {deleted_count} coduri din lista de excluderi.")
-        load_apex_exclude_codes.clear()  # Invalidează cache
+        load_apex_exclude_codes.clear()
         return True
     except Exception as e:
         st.error(f"❌ Eroare la ștergere excluderi: {e}")
@@ -325,170 +320,6 @@ def delete_apex_exclude_codes(codes: list[str]) -> bool:
             conn.rollback()
             conn.close()
         return False
-
-
-def read_smartbill_file(file) -> pd.DataFrame:
-    """
-    Citește fișierul SmartBill cu structură fixă:
-    - Header pe rândul 10 (index 9)
-    - Coloana 3 (C): Cod produs
-    - Coloana 5 (E): Stoc initial
-    - Coloana 6 (F): Intrari
-    - Coloana 7 (G): Iesiri
-    - Coloana 8 (H): Stoc final
-    """
-    try:
-        # Citim fișierul cu header pe rândul 10 (index 9)
-        df = pd.read_excel(file, header=9)
-
-        # Extragem doar coloanele necesare prin poziție (0-indexed)
-        # Coloana C (cod) = index 2
-        # Coloana E (stoc initial) = index 4
-        # Coloana F (intrari) = index 5
-        # Coloana G (iesiri) = index 6
-        # Coloana H (stoc final) = index 7
-
-        if df.shape[1] < 8:
-            st.error(f"Fișierul SmartBill nu are suficiente coloane (găsite {df.shape[1]}, necesare minim 8)")
-            return pd.DataFrame()
-
-        # Selectăm coloanele prin poziție
-        result = pd.DataFrame({
-            'cod': df.iloc[:, 2],  # Coloana C (index 2)
-            'stoc initial': df.iloc[:, 4],  # Coloana E (index 4)
-            'intrari': df.iloc[:, 5],  # Coloana F (index 5)
-            'iesiri': df.iloc[:, 6],  # Coloana G (index 6)
-            'stoc final': df.iloc[:, 7]  # Coloana H (index 7)
-        })
-
-        # Curățăm codul
-        result['cod'] = result['cod'].astype(str).str.strip()
-        result = result[result['cod'].str.strip() != '']
-        result = result[result['cod'] != 'nan']
-        result = result[result['cod'] != 'None']
-
-        # Convertim valorile numerice
-        for col in ['stoc initial', 'intrari', 'iesiri', 'stoc final']:
-            result[col] = pd.to_numeric(result[col], errors='coerce').fillna(0)
-
-        st.info(f"📊 SmartBill: încărcate {len(result)} produse")
-        return result
-
-    except Exception as e:
-        st.error(f"❌ Eroare la citire SmartBill: {e}")
-        import traceback
-        st.error(f"Detalii: {traceback.format_exc()}")
-        return pd.DataFrame()
-
-
-
-# =========================
-# SALVARE ÎN BD (CORECTATĂ)
-# =========================
-
-def save_apex_normalized_to_db(df: pd.DataFrame) -> bool:
-    """
-    Salvează datele APEX normalizate în tabelul apex_normalized.
-    Șterge toate datele existente înainte de salvare.
-    """
-    conn = get_db_connection()
-    if not conn:
-        st.error("❌ Nu pot salva - lipsește conexiunea DB")
-        return False
-
-    try:
-        cursor = conn.cursor()
-
-        # 1. Șterge datele existente
-        cursor.execute("DELETE FROM apex_normalized;")
-        deleted_count = cursor.rowcount
-        conn.commit()
-        st.info(f"🗑️ Șterse {deleted_count} înregistrări vechi din apex_normalized")
-
-        # 2. Insert datele noi cu progress indicator
-        insert_query = """
-            INSERT INTO apex_normalized
-            (cod_raw, cod, nume_apex, cantitate, pret_eur, pret_lei, order_hint, import_timestamp)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """
-
-        # Pregătim datele - IMPORTANT: folosim valorile deja calculate din DataFrame
-        insert_data = []
-        total_rows = len(df)
-
-        # Progress bar pentru pregătire date
-        progress_bar = st.progress(0, text="Pregătire date pentru salvare...")
-
-        for idx, row in df.iterrows():
-            # Extragem valorile direct din DataFrame (deja normalizate)
-            pret_eur_val = row.get("pret_eur", "0")
-            pret_lei_val = row.get("pret_lei", "0")
-
-            # Convertim la float doar la final
-            try:
-                pret_eur_float = float(parse_decimal_maybe(pret_eur_val))
-            except:
-                pret_eur_float = 0.0
-
-            try:
-                pret_lei_float = float(parse_decimal_maybe(pret_lei_val))
-            except:
-                pret_lei_float = 0.0
-
-            insert_data.append((
-                str(row.get("cod_raw", "")),
-                str(row.get("cod", "")),
-                str(row.get("nume_apex", "")),
-                str(row.get("cantitate", "")),
-                pret_eur_float,
-                pret_lei_float,
-                str(row.get("order_hint", "")),
-                datetime.now()
-            ))
-
-            # Update progress la fiecare 10% sau la ultimul rând
-            if (idx + 1) % max(1, total_rows // 10) == 0 or idx == total_rows - 1:
-                progress_pct = int((idx + 1) / total_rows * 100)
-                progress_bar.progress((idx + 1) / total_rows, 
-                                     text=f"Pregătire date: {idx + 1}/{total_rows} ({progress_pct}%)")
-
-        progress_bar.progress(1.0, text="Date pregătite! ✓")
-
-        # Scriere în batch-uri cu progress indicator
-        st.info("💾 Scriere în baza de date...")
-        write_progress = st.progress(0, text="Salvare în BD...")
-
-        batch_size = 1000  # Scriem câte 1000 de înregistrări odată
-        total_batches = (len(insert_data) + batch_size - 1) // batch_size
-
-        for batch_idx in range(0, len(insert_data), batch_size):
-            batch = insert_data[batch_idx:batch_idx + batch_size]
-            cursor.executemany(insert_query, batch)
-            conn.commit()
-
-            # Update progress
-            current_batch = (batch_idx // batch_size) + 1
-            progress_pct = int(current_batch / total_batches * 100)
-            write_progress.progress(min(current_batch / total_batches, 1.0), 
-                                   text=f"Salvat batch {current_batch}/{total_batches} ({progress_pct}%)")
-
-        write_progress.progress(1.0, text="Salvare completă! ✓")
-        st.success(f"✅ Salvate {len(insert_data)} înregistrări noi în apex_normalized")
-
-        cursor.close()
-        conn.close()
-        return True
-
-    except Exception as e:
-        st.error(f"❌ Eroare la salvare în BD: {e}")
-        import traceback
-        st.error(f"Detalii: {traceback.format_exc()}")
-        if conn:
-            conn.rollback()
-            conn.close()
-        return False
-
-
 
 def normalize_apex_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Mapează coloanele cheie și elimină rândurile fără cod."""
@@ -524,10 +355,13 @@ def normalize_apex_columns(df: pd.DataFrame) -> pd.DataFrame:
 
     out = df.iloc[:, idxs].copy()
     out.columns = names
+
     for c in out.columns:
         out[c] = out[c].astype(str).str.replace("\xa0", " ").str.strip()
+
     out["cod_raw"] = out["cod_raw"].replace({"nan": "", "None": ""})
     out = out[out["cod_raw"].astype(str).str.strip() != ""].copy()
+
     return out
 
 def expand_apex_rows(df_norm_cols: pd.DataFrame) -> pd.DataFrame:
@@ -541,8 +375,10 @@ def expand_apex_rows(df_norm_cols: pd.DataFrame) -> pd.DataFrame:
             new_r = r.copy()
             new_r["cod"] = c
             rows.append(new_r)
+
     if not rows:
         return pd.DataFrame(columns=list(df_norm_cols.columns) + ["cod"])
+
     out = pd.DataFrame(rows)
     out["cod"] = out["cod"].astype(str).str.replace(" ", "", regex=False).str.strip()
 
@@ -556,30 +392,296 @@ def expand_apex_rows(df_norm_cols: pd.DataFrame) -> pd.DataFrame:
     out = out.drop_duplicates().reset_index(drop=True)
     return out
 
+def save_apex_normalized_to_db(df: pd.DataFrame) -> bool:
+    """Salvează datele APEX normalizate în tabelul apex_normalized."""
+    conn = get_db_connection()
+    if not conn:
+        st.error("❌ Nu pot salva - lipsește conexiunea DB")
+        return False
 
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM apex_normalized;")
+        deleted_count = cursor.rowcount
+        conn.commit()
+        st.info(f"🗑️ Șterse {deleted_count} înregistrări vechi din apex_normalized")
+
+        insert_query = """
+        INSERT INTO apex_normalized
+        (cod_raw, cod, nume_apex, cantitate, pret_eur, pret_lei, order_hint, import_timestamp)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        """
+
+        insert_data = []
+        total_rows = len(df)
+        progress_bar = st.progress(0, text="Pregătire date pentru salvare...")
+
+        for idx, row in df.iterrows():
+            pret_eur_val = row.get("pret_eur", "0")
+            pret_lei_val = row.get("pret_lei", "0")
+
+            try:
+                pret_eur_float = float(parse_decimal_maybe(pret_eur_val))
+            except:
+                pret_eur_float = 0.0
+
+            try:
+                pret_lei_float = float(parse_decimal_maybe(pret_lei_val))
+            except:
+                pret_lei_float = 0.0
+
+            insert_data.append((
+                str(row.get("cod_raw", "")),
+                str(row.get("cod", "")),
+                str(row.get("nume_apex", "")),
+                str(row.get("cantitate", "")),
+                pret_eur_float,
+                pret_lei_float,
+                str(row.get("order_hint", "")),
+                datetime.now()
+            ))
+
+            if (idx + 1) % max(1, total_rows // 10) == 0 or idx == total_rows - 1:
+                progress_pct = int((idx + 1) / total_rows * 100)
+                progress_bar.progress((idx + 1) / total_rows,
+                    text=f"Pregătire date: {idx + 1}/{total_rows} ({progress_pct}%)")
+
+        progress_bar.progress(1.0, text="Date pregătite! ✓")
+
+        st.info("💾 Scriere în baza de date...")
+        write_progress = st.progress(0, text="Salvare în BD...")
+        batch_size = 1000
+        total_batches = (len(insert_data) + batch_size - 1) // batch_size
+
+        for batch_idx in range(0, len(insert_data), batch_size):
+            batch = insert_data[batch_idx:batch_idx + batch_size]
+            cursor.executemany(insert_query, batch)
+            conn.commit()
+
+            current_batch = (batch_idx // batch_size) + 1
+            progress_pct = int(current_batch / total_batches * 100)
+            write_progress.progress(min(current_batch / total_batches, 1.0),
+                text=f"Salvat batch {current_batch}/{total_batches} ({progress_pct}%)")
+
+        write_progress.progress(1.0, text="Salvare completă! ✓")
+        st.success(f"✅ Salvate {len(insert_data)} înregistrări noi în apex_normalized")
+
+        cursor.close()
+        conn.close()
+        return True
+
+    except Exception as e:
+        st.error(f"❌ Eroare la salvare în BD: {e}")
+        import traceback
+        st.error(f"Detalii: {traceback.format_exc()}")
+        if conn:
+            conn.rollback()
+            conn.close()
+        return False
+
+# =========================
+# FUNCȚII GSMNET (NOI)
+# =========================
+def read_gsmnet_file(file) -> pd.DataFrame:
+    """
+    Citește fișierul GSMNET cu structură:
+    - Header pe rândul 10 (index 9)
+    - Coloana 1: Partnumber (SKU)
+    - Coloana 3: Name
+    - Coloana 4: Stock
+    - Coloana 5: Price (EUR)
+    """
+    try:
+        df = pd.read_excel(file, header=9)
+
+        if df.shape[1] < 6:
+            st.error(f"Fișierul GSMNET nu are suficiente coloane (găsite {df.shape[1]}, necesare minim 6)")
+            return pd.DataFrame()
+
+        # Selectăm coloanele prin poziție
+        result = pd.DataFrame({
+            'sku': df.iloc[:, 1],      # Coloana Partnumber (index 1)
+            'name': df.iloc[:, 3],     # Coloana Name (index 3)
+            'stock': df.iloc[:, 4],    # Coloana Stock (index 4)
+            'price_eur': df.iloc[:, 5] # Coloana Price (index 5)
+        })
+
+        # Curățăm SKU
+        result['sku'] = result['sku'].astype(str).str.strip()
+        result = result[result['sku'].str.strip() != '']
+        result = result[result['sku'] != 'nan']
+        result = result[result['sku'] != 'None']
+
+        # Curățăm numele
+        result['name'] = result['name'].astype(str).str.strip()
+
+        # Convertim valorile numerice
+        result['stock'] = pd.to_numeric(result['stock'], errors='coerce').fillna(0)
+        result['price_eur'] = pd.to_numeric(result['price_eur'], errors='coerce').fillna(0)
+
+        # Calculăm prețul în LEI
+        result['price_lei'] = (result['price_eur'] * float(EUR_TO_RON)).round(2)
+
+        st.info(f"📊 GSMNET: încărcate {len(result)} produse")
+        return result
+
+    except Exception as e:
+        st.error(f"❌ Eroare la citire GSMNET: {e}")
+        import traceback
+        st.error(f"Detalii: {traceback.format_exc()}")
+        return pd.DataFrame()
+
+def save_gsmnet_to_db(df: pd.DataFrame) -> bool:
+    """Salvează datele GSMNET în tabelul gsmnet_normalized."""
+    conn = get_db_connection()
+    if not conn:
+        st.error("❌ Nu pot salva - lipsește conexiunea DB")
+        return False
+
+    try:
+        cursor = conn.cursor()
+
+        # Șterge datele existente
+        cursor.execute("DELETE FROM gsmnet_normalized;")
+        deleted_count = cursor.rowcount
+        conn.commit()
+        st.info(f"🗑️ Șterse {deleted_count} înregistrări vechi din gsmnet_normalized")
+
+        # Insert datele noi
+        insert_query = """
+        INSERT INTO gsmnet_normalized
+        (sku, name, stock, price_eur, price_lei, import_timestamp)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """
+
+        insert_data = []
+        total_rows = len(df)
+        progress_bar = st.progress(0, text="Pregătire date GSMNET...")
+
+        for idx, row in df.iterrows():
+            insert_data.append((
+                str(row.get("sku", "")),
+                str(row.get("name", "")),
+                float(row.get("stock", 0)),
+                float(row.get("price_eur", 0)),
+                float(row.get("price_lei", 0)),
+                datetime.now()
+            ))
+
+            if (idx + 1) % max(1, total_rows // 10) == 0 or idx == total_rows - 1:
+                progress_pct = int((idx + 1) / total_rows * 100)
+                progress_bar.progress((idx + 1) / total_rows,
+                    text=f"Pregătire date: {idx + 1}/{total_rows} ({progress_pct}%)")
+
+        progress_bar.progress(1.0, text="Date pregătite! ✓")
+
+        st.info("💾 Scriere GSMNET în baza de date...")
+        write_progress = st.progress(0, text="Salvare în BD...")
+        batch_size = 1000
+        total_batches = (len(insert_data) + batch_size - 1) // batch_size
+
+        for batch_idx in range(0, len(insert_data), batch_size):
+            batch = insert_data[batch_idx:batch_idx + batch_size]
+            cursor.executemany(insert_query, batch)
+            conn.commit()
+
+            current_batch = (batch_idx // batch_size) + 1
+            progress_pct = int(current_batch / total_batches * 100)
+            write_progress.progress(min(current_batch / total_batches, 1.0),
+                text=f"Salvat batch {current_batch}/{total_batches} ({progress_pct}%)")
+
+        write_progress.progress(1.0, text="Salvare completă! ✓")
+        st.success(f"✅ Salvate {len(insert_data)} înregistrări noi în gsmnet_normalized")
+
+        cursor.close()
+        conn.close()
+        return True
+
+    except Exception as e:
+        st.error(f"❌ Eroare la salvare GSMNET în BD: {e}")
+        import traceback
+        st.error(f"Detalii: {traceback.format_exc()}")
+        if conn:
+            conn.rollback()
+            conn.close()
+        return False
+
+def normalize_gsmnet_data(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalizează datele GSMNET (aplicăcanon_sku)."""
+    df = df.copy()
+    df['sku_canon'] = df['sku'].apply(canon_sku)
+    return df
+
+# =========================
+# SMARTBILL
+# =========================
+def read_smartbill_file(file) -> pd.DataFrame:
+    """
+    Citește fișierul SmartBill cu structură fixă:
+    - Header pe rândul 10 (index 9)
+    - Coloana 3 (C): Cod produs
+    - Coloana 5 (E): Stoc initial
+    - Coloana 6 (F): Intrari
+    - Coloana 7 (G): Iesiri
+    - Coloana 8 (H): Stoc final
+    """
+    try:
+        df = pd.read_excel(file, header=9)
+
+        if df.shape[1] < 8:
+            st.error(f"Fișierul SmartBill nu are suficiente coloane (găsite {df.shape[1]}, necesare minim 8)")
+            return pd.DataFrame()
+
+        result = pd.DataFrame({
+            'cod': df.iloc[:, 2],
+            'stoc initial': df.iloc[:, 4],
+            'intrari': df.iloc[:, 5],
+            'iesiri': df.iloc[:, 6],
+            'stoc final': df.iloc[:, 7]
+        })
+
+        result['cod'] = result['cod'].astype(str).str.strip()
+        result = result[result['cod'].str.strip() != '']
+        result = result[result['cod'] != 'nan']
+        result = result[result['cod'] != 'None']
+
+        for col in ['stoc initial', 'intrari', 'iesiri', 'stoc final']:
+            result[col] = pd.to_numeric(result[col], errors='coerce').fillna(0)
+
+        st.info(f"📊 SmartBill: încărcate {len(result)} produse")
+        return result
+
+    except Exception as e:
+        st.error(f"❌ Eroare la citire SmartBill: {e}")
+        import traceback
+        st.error(f"Detalii: {traceback.format_exc()}")
+        return pd.DataFrame()
 
 # =========================
 # UI INPUT FILES
 # =========================
 st.subheader("📁 Fișiere de intrare")
 
-c1, c2 = st.columns(2)
+c1, c2, c3 = st.columns(3)
+
 with c1:
-    apex_file = st.file_uploader("Fișier APEX original (.xlsx / .xls / .csv)", type=["xlsx", "xls", "csv"], key="apex_raw")
+    apex_file = st.file_uploader("Fișier APEX (.xlsx / .xls / .csv)", type=["xlsx", "xls", "csv"], key="apex_raw")
+
 with c2:
-    smartbill_file = st.file_uploader("Fișier SmartBill (.xlsx sau .xls)", type=["xlsx", "xls"], key="smartbill")
+    gsmnet_file = st.file_uploader("Fișier GSMNET (.xlsx)", type=["xlsx"], key="gsmnet_raw")
+
+with c3:
+    smartbill_file = st.file_uploader("Fișier SmartBill (.xlsx)", type=["xlsx", "xls"], key="smartbill")
 
 # =========================
-# LOGICĂ PRINCIPALĂ
+# PROCESARE APEX
 # =========================
-apex_df_normalized = None
-
 apex_df_normalized = None
 
 if apex_file:
     st.markdown("---")
-    st.markdown("### 📊 Pas 1 — Normalizare APEX")
-    
+    st.markdown("### 📊 Pas 1A — Normalizare APEX")
+
     try:
         apex_raw = read_any_apex(apex_file)
         apex_trim = normalize_apex_columns(apex_raw)
@@ -587,97 +689,83 @@ if apex_file:
     except Exception as e:
         st.error(f"Eroare la normalizare APEX: {e}")
         st.stop()
-    
-    # ============================================
-    # APLICĂ EXCLUDERILE - ELIMINĂ CODURILE IGNORATE
-    # ============================================
+
+    # Aplică excluderile
     exclude_codes = load_apex_exclude_codes()
     apex_df_normalized_raw["cod_canon"] = apex_df_normalized_raw["cod"].map(canon_sku)
     mask_not_excluded = ~apex_df_normalized_raw["cod_canon"].isin(exclude_codes)
-    
-    # Datele finale = doar produsele neexcluse
+
     apex_df_normalized = apex_df_normalized_raw[mask_not_excluded].reset_index(drop=True)
-    
-    # Produsele excluse (pentru preview opțional)
     apex_excluded = apex_df_normalized_raw[~mask_not_excluded].reset_index(drop=True)
-    
+
     if not apex_excluded.empty:
-        st.info(f"🚫 {len(apex_excluded)} produse excluse (ignorate) din import")
-    
-    st.success(f"✅ APEX normalizat: {len(apex_df_normalized)} produse active (fără excluderi)")
-    
-    cols_show_norm = [c for c in ["cod", "nume_apex", "cantitate", "pret_eur", "pret_lei", "order_hint"] 
+        st.info(f"🚫 {len(apex_excluded)} produse APEX excluse (ignorate)")
+
+    st.success(f"✅ APEX normalizat: {len(apex_df_normalized)} produse active")
+
+    cols_show_norm = [c for c in ["cod", "nume_apex", "cantitate", "pret_eur", "pret_lei", "order_hint"]
                       if c in apex_df_normalized.columns]
     st.dataframe(apex_df_normalized[cols_show_norm].fillna(""), use_container_width=True)
-    
-    # ============================================
-    # UI PENTRU GESTIONARE EXCLUDERI
-    # ============================================
+
+    # UI pentru excluderi
     st.markdown("---")
-    st.markdown("#### 🧹 Gestionare excluderi permanente")
-    
+    st.markdown("#### 🧹 Gestionare excluderi permanente APEX")
+
     if "apex_exclude_selected" not in st.session_state:
         st.session_state.apex_exclude_selected = set()
-    
+
     all_codes_current = apex_df_normalized["cod_canon"].tolist()
-    
+
     col_sel1, col_sel2, col_sel3 = st.columns([1, 1, 2])
-    
+
     with col_sel1:
         select_all = st.checkbox("Selectează toate produsele vizibile", key="apex_exclude_select_all")
-    
+
     with col_sel2:
         if st.button("Resetează selecția"):
             st.session_state.apex_exclude_selected = set()
             st.rerun()
-    
-    # Aplică select all (în memorie, nu în DB)
+
     if select_all:
         st.session_state.apex_exclude_selected = set(all_codes_current)
-    
-    # Multiselect pentru alegere individuală
+
     current_selected_list = [c for c in all_codes_current if c in st.session_state.apex_exclude_selected]
+
     new_selected = st.multiselect(
-        "Selectează produse de exclus permanent (nu vor mai apărea la următoarele importuri):",
+        "Selectează produse de exclus permanent:",
         options=all_codes_current,
         default=current_selected_list,
-        key="apex_exclude_multiselect",
-        help="Produsele selectate vor fi salvate în lista de ignorare și eliminate din toate procesările viitoare"
+        key="apex_exclude_multiselect"
     )
-    
-    # Sincronizează selecția în session_state
+
     st.session_state.apex_exclude_selected = set(new_selected)
-    
+
     col_action1, col_action2 = st.columns([2, 2])
-    
+
     with col_action1:
         if st.button("💾 Salvează în lista de excluderi", type="primary", use_container_width=True):
             to_save = sorted(st.session_state.apex_exclude_selected)
             if save_apex_exclude_codes(to_save):
                 st.session_state.apex_exclude_selected = set()
                 st.rerun()
-    
+
     with col_action2:
-        # Buton pentru a vizualiza produsele deja excluse
         if st.button("👁️ Vezi toate excluderile active", use_container_width=True):
             st.session_state.show_excluded = not st.session_state.get("show_excluded", False)
-    
+
     if st.session_state.get("show_excluded", False) and len(exclude_codes) > 0:
         st.markdown("##### 🚫 Coduri excluse permanent:")
         excluded_df = pd.DataFrame({"cod": sorted(list(exclude_codes))})
         st.dataframe(excluded_df, use_container_width=True)
 
-        # UI pentru ștergere selectivă sau completă
         st.markdown("**Opțiuni de ștergere:**")
         col_del1, col_del2 = st.columns(2)
 
         with col_del1:
-            # Multiselect pentru ștergere selectivă
             codes_to_delete = st.multiselect(
-                "Selectează coduri de șters din excluderi:",
+                "Selectează coduri de șters:",
                 options=sorted(list(exclude_codes)),
-                key="delete_exclude_multiselect",
-                help="Selectează codurile pe care vrei să le scoți din lista de excluderi"
+                key="delete_exclude_multiselect"
             )
 
             if st.button("🗑️ Șterge codurile selectate", use_container_width=True):
@@ -685,12 +773,11 @@ if apex_file:
                     if delete_apex_exclude_codes(codes_to_delete):
                         st.rerun()
                 else:
-                    st.warning("Selectează cel puțin un cod pentru ștergere")
+                    st.warning("Selectează cel puțin un cod")
 
         with col_del2:
-            st.write("")  # Spacing
-            st.write("")  # Spacing
-            # Buton pentru ștergere totală
+            st.write("")
+            st.write("")
             if st.button("🗑️ Șterge TOATE excluderile", type="secondary", use_container_width=True):
                 conn = get_db_connection()
                 if conn:
@@ -704,37 +791,79 @@ if apex_file:
                         conn.close()
                         st.rerun()
                     except Exception as e:
-                        st.error(f"❌ Eroare la ștergere: {e}")
+                        st.error(f"❌ Eroare: {e}")
                         if conn:
                             conn.rollback()
                             conn.close()
-    
-    # ============================================
-    # BUTOANE ACȚIUNI PRINCIPALE
-    # ============================================
+
+    # Butoane salvare APEX
     st.markdown("---")
     col_a, col_b = st.columns(2)
-    
+
     with col_a:
         csv_buf = io.StringIO()
         apex_df_normalized.to_csv(csv_buf, index=False, quoting=csv.QUOTE_MINIMAL)
         st.download_button(
-            "⬇️ Descarcă CSV (produse active)", 
-            data=csv_buf.getvalue(), 
-            file_name="apex_normalizat.csv", 
+            "⬇️ Descarcă CSV APEX",
+            data=csv_buf.getvalue(),
+            file_name="apex_normalizat.csv",
             mime="text/csv"
         )
-    
+
     with col_b:
-        if st.button("💾 Salvează în BD (apex_normalized)", type="primary"):
-            # Salvează DOAR produsele neexcluse
+        if st.button("💾 Salvează APEX în BD", type="primary"):
             save_apex_normalized_to_db(apex_df_normalized)
 
-if apex_df_normalized is not None and smartbill_file:
-    st.markdown("---")
-    st.markdown("### 🔄 Pas 2 — Mapare pe catalog + raport")
+# =========================
+# PROCESARE GSMNET
+# =========================
+gsmnet_df_normalized = None
 
-    # 0) Mapping din DB
+if gsmnet_file:
+    st.markdown("---")
+    st.markdown("### 📊 Pas 1B — Normalizare GSMNET")
+
+    try:
+        gsmnet_df_raw = read_gsmnet_file(gsmnet_file)
+        if not gsmnet_df_raw.empty:
+            gsmnet_df_normalized = normalize_gsmnet_data(gsmnet_df_raw)
+            st.success(f"✅ GSMNET normalizat: {len(gsmnet_df_normalized)} produse")
+
+            cols_show_gsmnet = ["sku", "name", "stock", "price_eur", "price_lei"]
+            st.dataframe(gsmnet_df_normalized[cols_show_gsmnet].fillna(""), use_container_width=True)
+
+            # Butoane salvare GSMNET
+            st.markdown("---")
+            col_g1, col_g2 = st.columns(2)
+
+            with col_g1:
+                csv_buf_gsmnet = io.StringIO()
+                gsmnet_df_normalized.to_csv(csv_buf_gsmnet, index=False, quoting=csv.QUOTE_MINIMAL)
+                st.download_button(
+                    "⬇️ Descarcă CSV GSMNET",
+                    data=csv_buf_gsmnet.getvalue(),
+                    file_name="gsmnet_normalizat.csv",
+                    mime="text/csv"
+                )
+
+            with col_g2:
+                if st.button("💾 Salvează GSMNET în BD", type="primary"):
+                    save_gsmnet_to_db(gsmnet_df_normalized)
+        else:
+            st.error("Fișierul GSMNET este gol sau invalid")
+    except Exception as e:
+        st.error(f"Eroare la procesare GSMNET: {e}")
+        import traceback
+        st.error(f"Detalii: {traceback.format_exc()}")
+
+# =========================
+# RAPORT FINAL CU COMPARAȚIE
+# =========================
+if (apex_df_normalized is not None or gsmnet_df_normalized is not None) and smartbill_file:
+    st.markdown("---")
+    st.markdown("### 🔄 Pas 2 — Mapare pe catalog + comparație prețuri")
+
+    # Încarcă mapping
     try:
         df_map = load_sku_mapping_from_db()
     except Exception as e:
@@ -747,12 +876,7 @@ if apex_df_normalized is not None and smartbill_file:
         df_map.drop_duplicates(subset=["primary_sku"])["denumire_db"].astype(str)
     ))
 
-    # 1) APEX
-    apex_df = apex_df_normalized.copy()
-    apex_df["cod_canon"] = apex_df["cod"].map(canon_sku)
-    name_col_apex = "nume_apex" if "nume_apex" in apex_df.columns else None
-
-    # 2) SmartBill
+    # SmartBill
     try:
         smart_df = read_smartbill_file(smartbill_file)
         if smart_df.empty:
@@ -773,76 +897,157 @@ if apex_df_normalized is not None and smartbill_file:
             smart_df[col] = 0
         smart_df[col] = pd.to_numeric(smart_df[col], errors="coerce").fillna(0)
 
-    # 3) Canonizare + mapare
     smart_df["cod_canon"] = smart_df["cod"].map(canon_sku)
-    apex_df["cod_match"] = apex_df["cod_canon"].map(alt_to_principal).fillna(apex_df["cod_canon"])
     smart_df["cod_match"] = smart_df["cod_canon"].map(alt_to_principal).fillna(smart_df["cod_canon"])
-
-    # 4) Agregare SmartBill
     smart_grouped = smart_df.groupby("cod_match", as_index=False)[["iesiri", "stoc final"]].sum()
 
-    # 5) Merge + comandă
-    merged = apex_df.merge(smart_grouped, on="cod_match", how="left")
-    for col in ["iesiri", "stoc final"]:
-        if col not in merged.columns:
-            merged[col] = 0
-        merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0)
-    merged["comanda"] = merged.apply(compute_order, axis=1)
+    # Procesare APEX
+    apex_merged = None
+    if apex_df_normalized is not None:
+        apex_df = apex_df_normalized.copy()
+        apex_df["cod_canon"] = apex_df["cod"].map(canon_sku)
+        apex_df["cod_match"] = apex_df["cod_canon"].map(alt_to_principal).fillna(apex_df["cod_canon"])
 
-    # 6) Nume DB
+        # Agregare pe SKU principal (luăm primul preț dacă sunt duplicate)
+        apex_agg = apex_df.groupby("cod_match", as_index=False).agg({
+            "cod": "first",
+            "nume_apex": "first",
+            "pret_eur": "first",
+            "pret_lei": "first"
+        }).rename(columns={
+            "pret_eur": "apex_pret_eur",
+            "pret_lei": "apex_pret_lei"
+        })
+
+        apex_merged = smart_grouped.merge(apex_agg, on="cod_match", how="outer")
+
+    # Procesare GSMNET
+    gsmnet_merged = None
+    if gsmnet_df_normalized is not None:
+        gsmnet_df = gsmnet_df_normalized.copy()
+        gsmnet_df["cod_match"] = gsmnet_df["sku_canon"].map(alt_to_principal).fillna(gsmnet_df["sku_canon"])
+
+        # Agregare pe SKU principal
+        gsmnet_agg = gsmnet_df.groupby("cod_match", as_index=False).agg({
+            "sku": "first",
+            "name": "first",
+            "price_eur": "first",
+            "price_lei": "first"
+        }).rename(columns={
+            "price_eur": "gsmnet_pret_eur",
+            "price_lei": "gsmnet_pret_lei"
+        })
+
+        gsmnet_merged = smart_grouped.merge(gsmnet_agg, on="cod_match", how="outer")
+
+    # Merge final
+    if apex_merged is not None and gsmnet_merged is not None:
+        merged = apex_merged.merge(gsmnet_merged, on=["cod_match", "iesiri", "stoc final"], how="outer")
+    elif apex_merged is not None:
+        merged = apex_merged
+    elif gsmnet_merged is not None:
+        merged = gsmnet_merged
+    else:
+        st.error("Nu există date de la niciun furnizor!")
+        st.stop()
+
+    # Completare valori lipsă
+    for col in ["iesiri", "stoc final"]:
+        if col in merged.columns:
+            merged[col] = pd.to_numeric(merged[col], errors="coerce").fillna(0)
+
+    # Calculare comandă
+    merged["comanda_cantitate"] = merged.apply(compute_order, axis=1)
+
+    # Comparație prețuri și alegere furnizor
+    def choose_supplier(row):
+        """Alege furnizorul cu prețul cel mai mic."""
+        apex_pret = row.get("apex_pret_eur", None)
+        gsmnet_pret = row.get("gsmnet_pret_eur", None)
+
+        # Convertim la float pentru comparație
+        try:
+            apex_val = float(apex_pret) if apex_pret is not None and not pd.isna(apex_pret) else None
+        except:
+            apex_val = None
+
+        try:
+            gsmnet_val = float(gsmnet_pret) if gsmnet_pret is not None and not pd.isna(gsmnet_pret) else None
+        except:
+            gsmnet_val = None
+
+        if apex_val is not None and gsmnet_val is not None:
+            if apex_val <= gsmnet_val:
+                return "APEX"
+            else:
+                return "GSMNET"
+        elif apex_val is not None:
+            return "APEX"
+        elif gsmnet_val is not None:
+            return "GSMNET"
+        else:
+            return ""
+
+    merged["furnizor_optim"] = merged.apply(choose_supplier, axis=1)
+    merged["comanda_apex"] = merged.apply(lambda r: r["comanda_cantitate"] if r["furnizor_optim"] == "APEX" else "", axis=1)
+    merged["comanda_gsmnet"] = merged.apply(lambda r: r["comanda_cantitate"] if r["furnizor_optim"] == "GSMNET" else "", axis=1)
+
+    # Nume DB
     merged = merged.rename(columns={"cod_match": "SKU_principal"})
     merged["Produs_DB"] = merged["SKU_principal"].map(prim_to_name)
 
-    # 7) Afișare
-    st.subheader("📦 Rezultat comandă (agregat pe SKU principal)")
-    show_cols = ["cod", "SKU_principal", "Produs_DB", "iesiri", "stoc final", "comanda"]
-    if name_col_apex:
-        show_cols.insert(1, name_col_apex)
-    for extra in ["pret_eur", "pret_lei"]:
-        if extra in merged.columns and extra not in show_cols:
-            show_cols.append(extra)
-    show_cols = [c for c in show_cols if c in merged.columns]
-    st.dataframe(merged[show_cols], use_container_width=True)
+    # Afișare rezultat
+    st.subheader("📦 Rezultat comandă cu comparație prețuri")
 
-    # 8) Export CSV
+    show_cols = ["SKU_principal", "Produs_DB", "iesiri", "stoc final"]
+
+    if "cod" in merged.columns:
+        show_cols.insert(0, "cod")
+    if "sku" in merged.columns and "cod" not in show_cols:
+        show_cols.insert(0, "sku")
+
+    if apex_df_normalized is not None:
+        show_cols.extend(["apex_pret_eur", "apex_pret_lei", "comanda_apex"])
+
+    if gsmnet_df_normalized is not None:
+        show_cols.extend(["gsmnet_pret_eur", "gsmnet_pret_lei", "comanda_gsmnet"])
+
+    show_cols.append("furnizor_optim")
+
+    show_cols = [c for c in show_cols if c in merged.columns]
+
+    st.dataframe(merged[show_cols].fillna(""), use_container_width=True)
+
+    # Export CSV
     out_csv = io.StringIO()
     merged.to_csv(out_csv, index=False, quoting=csv.QUOTE_MINIMAL)
-    st.download_button("⬇️ Descarcă comandă furnizor (CSV)", data=out_csv.getvalue(), file_name="apex_comanda.csv", mime="text/csv")
+    st.download_button(
+        "⬇️ Descarcă comandă comparată (CSV)",
+        data=out_csv.getvalue(),
+        file_name="comanda_furnizori_comparata.csv",
+        mime="text/csv"
+    )
 
-    # 9) Raport discrepanțe
-    st.subheader("⚠️ Raport discrepanțe APEX vs SmartBill")
-    smart_canon_set = set(smart_grouped["cod_match"].unique())
-    apex_canon_set = set(apex_df["cod_canon"].map(lambda x: alt_to_principal.get(x, x)).unique())
+    # Statistici
+    st.markdown("---")
+    st.subheader("📊 Statistici comparație")
 
-    in_apex_not_in_smart = apex_df.loc[~apex_df["cod_match"].isin(smart_canon_set), ["cod", "cod_match"]].copy()
-    in_apex_not_in_smart["categorie"] = "APEX: lipsește în SmartBill"
-    if name_col_apex:
-        in_apex_not_in_smart = in_apex_not_in_smart.merge(
-            apex_df[["cod", name_col_apex]], on="cod", how="left"
-        ).rename(columns={name_col_apex: "nume_apex"})
-    in_apex_not_in_smart["iesiri"] = ""
-    in_apex_not_in_smart["stoc final"] = ""
+    col_stat1, col_stat2, col_stat3 = st.columns(3)
 
-    sb_zero = smart_grouped[(smart_grouped["stoc final"] == 0) & (smart_grouped["iesiri"] == 0)].copy()
-    sb_zero_in_apex = sb_zero[sb_zero["cod_match"].isin(apex_canon_set)].copy()
-    sb_zero_in_apex["categorie"] = "SB: 0 stoc & 0 mișcări"
-    if name_col_apex:
-        apex_name_by_canon = apex_df.drop_duplicates(subset=["cod_match"])[["cod_match", name_col_apex]].rename(columns={name_col_apex: "nume_apex"})
-        sb_zero_in_apex = sb_zero_in_apex.merge(apex_name_by_canon, on="cod_match", how="left")
-    apex_rep = apex_df.drop_duplicates(subset=["cod_match"])[["cod_match", "cod"]]
-    sb_zero_in_apex = sb_zero_in_apex.merge(apex_rep, on="cod_match", how="left")
+    with col_stat1:
+        total_produse = len(merged[merged["comanda_cantitate"] > 0])
+        st.metric("Total produse de comandat", total_produse)
 
-    discrepante_cols = ["categorie", "cod", "cod_match", "nume_apex", "iesiri", "stoc final"]
-    discrepante = pd.concat([
-        in_apex_not_in_smart.reindex(columns=discrepante_cols, fill_value=""),
-        sb_zero_in_apex.reindex(columns=discrepante_cols, fill_value=""),
-    ], ignore_index=True).sort_values(["categorie", "cod_match", "cod"], kind="stable")
+    with col_stat2:
+        comenzi_apex = len(merged[merged["furnizor_optim"] == "APEX"])
+        st.metric("Comenzi APEX", comenzi_apex)
 
-    st.dataframe(discrepante, use_container_width=True)
-    disc_buffer = io.StringIO()
-    discrepante.to_csv(disc_buffer, index=False, quoting=csv.QUOTE_MINIMAL)
-    st.download_button("⬇️ Descarcă discrepanțe (CSV)", data=disc_buffer.getvalue(), file_name="apex_smartbill_discrepante.csv", mime="text/csv")
+    with col_stat3:
+        comenzi_gsmnet = len(merged[merged["furnizor_optim"] == "GSMNET"])
+        st.metric("Comenzi GSMNET", comenzi_gsmnet)
 
 else:
-    if not apex_file:
-        st.info("👆 Încarcă fișierul APEX pentru a începe")
+    if not apex_file and not gsmnet_file:
+        st.info("👆 Încarcă cel puțin un fișier furnizor (APEX sau GSMNET) pentru a începe")
+    elif not smartbill_file:
+        st.info("👆 Încarcă și fișierul SmartBill pentru a genera raportul de comandă")

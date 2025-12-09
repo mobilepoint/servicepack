@@ -732,14 +732,8 @@ def step3_check_stock_and_prices():
         if conn:
             conn.close()
 
-# ============ PASUL 4: Adaugă în coș ============
 def step4_add_to_cart():
-    """PASUL 4: Calculează profitabilitate și adaugă produse în coșul Foneday"""
-    progress_bar = st.progress(0)
-    status_container = st.empty()
-    
-    log_event("step4_start", "PASUL 4: Adăugare în coș Foneday", status="info")
-    status_container.info("🛒 PASUL 4: Verific produse profitabile...")
+    """PASUL 4: Verifică profitabilitate, compară cu APEX, și adaugă în coș doar ce alegi"""
     
     conn = None
     try:
@@ -747,134 +741,279 @@ def step4_add_to_cart():
         if not conn:
             st.error("❌ Nu pot conecta la baza de date")
             return 0, 0
-        
+
         cursor = conn.cursor()
-        
-        # Găsește produse disponibile la Foneday (din PASUL 3)
+
+        # 1. Produse disponibile la Foneday (din PASUL 3) + preț Woo
         cursor.execute("""
-            SELECT product_id, sku, foneday_sku, price_eur
-            FROM public.foneday_inventory
-            WHERE instock = TRUE
+            SELECT fi.product_id,
+                   fi.sku              AS my_sku,
+                   p.name              AS product_name,
+                   fi.foneday_sku,
+                   fi.price_eur        AS foneday_price_eur,
+                   wp.regular_price    AS woo_price_ron
+            FROM public.foneday_inventory fi
+            LEFT JOIN product_sku ps
+                   ON fi.sku = ps.sku AND ps.is_primary = TRUE
+            LEFT JOIN product p
+                   ON ps.product_id = p.id
+            LEFT JOIN v_woo_prices wp
+                   ON fi.sku = wp.sku
+            WHERE fi.instock = TRUE
         """)
-        available_products = cursor.fetchall()
-        
-        if not available_products:
-            status_container.info("Nu există produse disponibile la Foneday. Rulează PASUL 3!")
+        rows = cursor.fetchall()
+
+        if not rows:
+            st.info("Nu există produse disponibile în `foneday_inventory`. Rulează mai întâi PASUL 3!")
             log_event("step4_complete", "Nu există produse disponibile", status="info")
             cursor.close()
             return 0, 0
-        
-        status_container.info(f"💰 Analizez profitabilitatea pentru {len(available_products)} produse...")
-        log_event("step4_process", f"Procesez {len(available_products)} produse disponibile", status="info")
-        
-        added_to_cart = 0
-        not_profitable = 0
-        missing_price = 0
-        
-        for idx, (product_id, my_sku, foneday_sku, foneday_price) in enumerate(available_products):
-            status_container.info(f"🛒 PASUL 4: Verific {idx+1}/{len(available_products)}: {my_sku}")
-            progress_bar.progress((idx + 1) / len(available_products))
-            
-            # CONVERSIE EXPLICIT LA FLOAT
-            try:
-                foneday_price_float = float(foneday_price) if foneday_price else 0
-            except (ValueError, TypeError):
-                foneday_price_float = 0
-            
-            if foneday_price_float <= 0:
-                missing_price += 1
-                continue
-            
-            # Obține prețul de vânzare din WooCommerce
-            cursor.execute("""
-                SELECT regular_price FROM v_woo_prices WHERE sku = %s
-            """, (my_sku,))
-            price_result = cursor.fetchone()
-            
-            if not price_result or not price_result[0]:
-                missing_price += 1
-                continue
-            
-            # CONVERSIE EXPLICIT LA FLOAT
-            try:
-                woo_price_float = float(price_result[0])
-            except (ValueError, TypeError):
-                woo_price_float = 0
-            
-            if woo_price_float <= 0:
-                missing_price += 1
-                continue
-            
-            # Calculează profitabilitate
-            if is_profitable(foneday_price_float, woo_price_float):
-                profit_margin = calculate_profit_margin(foneday_price_float, woo_price_float)
-                
-                # Adaugă în coșul Foneday prin API (2 bucăți)
-                cart_result = add_to_foneday_cart(foneday_sku, 2, f"Auto-import - {my_sku}")
-                
-                if cart_result:
-                    try:
-                        # Salvează în baza de date locală
-                        cursor.execute("""
-                            INSERT INTO public.foneday_cart 
-                            (product_id, sku, foneday_sku, quantity, price_eur, woo_price_ron, 
-                             profit_margin, is_profitable, status, note)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (
-                            product_id,
-                            my_sku,
-                            foneday_sku,
-                            2,
-                            foneday_price_float,
-                            woo_price_float,
-                            profit_margin,
-                            True,
-                            'added_to_cart',
-                            f"Profit: {profit_margin}% - 2 buc"
-                        ))
-                        conn.commit()
-                        added_to_cart += 1
-                        log_event("step4_add", f"Adăugat: {my_sku} - Profit: {profit_margin}%", sku=my_sku, status="success")
-                    except Exception as e:
-                        conn.rollback()
-                        log_event("step4_error", f"Eroare salvare coș {my_sku}: {e}", status="error")
-                else:
-                    log_event("step4_warning", f"Nu s-a putut adăuga în coș: {my_sku}", sku=my_sku, status="warning")
-            else:
-                not_profitable += 1
-            
-            time.sleep(0.1)  # Rate limiting API
-        
-        cursor.close()
-        
-        progress_bar.progress(1.0)
-        status_container.empty()
-        
-        success_msg = f"PASUL 4: {added_to_cart} adăugate, {not_profitable} neprofitabile, {missing_price} fără preț"
-        log_event("step4_complete", success_msg, status="success")
-        
-        st.success(f"""
-        ✅ **PASUL 4 FINALIZAT:**
-        - 🛒 **{added_to_cart} produse** adăugate în coșul Foneday (2 buc fiecare)
-        - ❌ **{not_profitable} produse** neprofitabile (marjă < {(1-MIN_PROFIT_MARGIN)*100:.0f}%)
-        - ⚠️ **{missing_price} produse** fără preț valid (actualizează din Pagina 1)
-        - 💡 Parametri profit: EUR/RON = {EUR_RON_RATE}, TVA = {TVA_RATE}, Marjă min = {(1-MIN_PROFIT_MARGIN)*100:.0f}%
+
+        df_foneday = pd.DataFrame(
+            rows,
+            columns=[
+                "product_id",
+                "sku",
+                "product_name",
+                "foneday_sku",
+                "foneday_price_eur",
+                "woo_price_ron",
+            ],
+        )
+
+        # Asigurăm tipuri numerice
+        df_foneday["foneday_price_eur"] = pd.to_numeric(
+            df_foneday["foneday_price_eur"], errors="coerce"
+        )
+        df_foneday["woo_price_ron"] = pd.to_numeric(
+            df_foneday["woo_price_ron"], errors="coerce"
+        )
+
+        # 2. Filtrează doar produsele PROFITABILE (marjă > MIN_PROFIT_MARGIN)
+        def is_profitable_row(row):
+            if pd.isnull(row["woo_price_ron"]) or pd.isnull(row["foneday_price_eur"]):
+                return False
+            if row["woo_price_ron"] <= 0 or row["foneday_price_eur"] <= 0:
+                return False
+            return is_profitable(row["foneday_price_eur"], row["woo_price_ron"])
+
+        df_foneday["is_profitable"] = df_foneday.apply(is_profitable_row, axis=1)
+        df_profitable = df_foneday[df_foneday["is_profitable"] == True].copy()
+
+        if df_profitable.empty:
+            st.warning(f"⚠️ Nu există produse profitabile (marjă > {(1-MIN_PROFIT_MARGIN)*100:.0f}%)")
+            log_event("step4_complete", "Nu există produse profitabile", status="warning")
+            cursor.close()
+            return 0, 0
+
+        st.info(f"✅ Găsite {len(df_profitable)} produse profitabile (marjă > {(1-MIN_PROFIT_MARGIN)*100:.0f}%) în Foneday")
+
+        # 3. Caută prețuri APEX pentru produsele profitabile
+        cursor.execute("""
+            SELECT an.cod        AS sku,
+                   an.pret_eur  AS apex_price_eur
+            FROM public.apex_normalized an
+            WHERE an.cod IS NOT NULL
+              AND an.cod IN (
+                  SELECT DISTINCT sku
+                  FROM public.foneday_inventory
+                  WHERE instock = TRUE
+              )
         """)
-        
-        return added_to_cart, not_profitable
+        apex_rows = cursor.fetchall()
+
+        df_apex = pd.DataFrame(apex_rows, columns=["sku", "apex_price_eur"])
+        df_apex["apex_price_eur"] = pd.to_numeric(
+            df_apex["apex_price_eur"], errors="coerce"
+        )
+
+        # 4. Join Foneday + APEX
+        df = df_profitable.merge(df_apex, on="sku", how="left")
+
+        # 5. Calcul marjă Foneday-Woo și comparație cu APEX
+        def margin_fw(row):
+            if pd.isnull(row["woo_price_ron"]) or pd.isnull(row["foneday_price_eur"]):
+                return None
+            return calculate_profit_margin(
+                row["foneday_price_eur"], row["woo_price_ron"]
+            )
+
+        df["margin_fw"] = df.apply(margin_fw, axis=1)
+
+        def cheaper(row):
+            if pd.isnull(row["apex_price_eur"]):
+                return "Doar Foneday"
+            if row["foneday_price_eur"] < row["apex_price_eur"]:
+                return "Foneday"
+            if row["apex_price_eur"] < row["foneday_price_eur"]:
+                return "APEX"
+            return "Egal"
+
+        df["cheaper_source"] = df.apply(cheaper, axis=1)
+
+        # 6. PRE-SELECȚIE: bifează automat Foneday < APEX SAU doar Foneday
+        df["selected"] = df["cheaper_source"].isin(["Foneday", "Doar Foneday"])
+
+        # 7. Afișare tabel editabil
+        st.markdown("---")
+        st.markdown("### 📊 Produse profitabile - Comparație Foneday vs APEX")
+        st.markdown(f"Bifează produsele pe care vrei să le adaugi în coșul Foneday **(2 buc fiecare)**")
+
+        display_cols = [
+            "selected",
+            "sku",
+            "product_name",
+            "foneday_sku",
+            "foneday_price_eur",
+            "apex_price_eur",
+            "margin_fw",
+            "cheaper_source",
+        ]
+
+        df_view = df[display_cols].copy()
+
+        edited = st.data_editor(
+            df_view,
+            column_config={
+                "selected": st.column_config.CheckboxColumn(
+                    "✓",
+                    help="Bifează produsele pe care vrei să le trimiți în Foneday",
+                ),
+                "sku": "SKU",
+                "product_name": "Produs (catalogul tău)",
+                "foneday_sku": "SKU Foneday",
+                "foneday_price_eur": "Preț Foneday (€)",
+                "apex_price_eur": "Preț APEX (€)",
+                "margin_fw": "Marjă Foneday–Woo (%)",
+                "cheaper_source": "Mai ieftin",
+            },
+            hide_index=True,
+            use_container_width=True,
+            key="step4_selection_editor",
+        )
+
+        # 8. Luăm direct din DataFrame-ul editat ce este bifat
+        selected_edited = edited[edited["selected"] == True].copy()
+
+        # Join cu df complet pentru a avea și product_id, woo_price_ron etc.
+        to_send = selected_edited.merge(
+            df,
+            on=["sku", "foneday_sku", "foneday_price_eur", "apex_price_eur", "cheaper_source", "margin_fw"],
+            how="left",
+            suffixes=("", "_orig"),
+        )
+
+        # 9. Rezumat selecție
+        st.markdown("### 🛒 Rezumat selecție")
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            st.metric("Produse selectate", len(to_send))
+        with col_b:
+            total_est = (to_send["foneday_price_eur"] * 2).sum()
+            st.metric("Valoare estimată (2 buc/produs)", f"€{total_est:.2f}")
+        with col_c:
+            if len(to_send) > 0:
+                avg_margin = to_send["margin_fw"].mean()
+                st.metric("Marjă medie Foneday-Woo", f"{avg_margin:.2f}%")
+
+        # 10. Buton: trimite în Foneday ce este bifat
+        if not to_send.empty:
+            if st.button("🚀 Trimite în coș Foneday produsele selectate", type="primary"):
+                progress = st.progress(0)
+                status = st.empty()
+                added = 0
+                errors = 0
+
+                log_event("step4_start", f"Adăugare în coș: {len(to_send)} produse", status="info")
+
+                for i, row in to_send.reset_index(drop=True).iterrows():
+                    status.info(
+                        f"📦 {i+1}/{len(to_send)} – {row['product_name']} ({row['sku']})"
+                    )
+
+                    woo_price_ron = float(row.get("woo_price_ron", 0) or 0)
+                    profit_margin = (
+                        float(row["margin_fw"])
+                        if row.get("margin_fw") is not None
+                        else calculate_profit_margin(
+                            row["foneday_price_eur"], woo_price_ron
+                        )
+                    )
+
+                    cart_result = add_to_foneday_cart(
+                        row["foneday_sku"],
+                        2,
+                        f"Pasul 4 - {row['sku']} - Marjă: {profit_margin:.1f}%",
+                    )
+
+                    if cart_result:
+                        try:
+                            cursor.execute(
+                                """
+                                INSERT INTO public.foneday_cart
+                                    (product_id, sku, foneday_sku, quantity,
+                                     price_eur, woo_price_ron,
+                                     profit_margin, is_profitable,
+                                     status, note)
+                                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                """,
+                                (
+                                    row.get("product_id"),
+                                    row["sku"],
+                                    row["foneday_sku"],
+                                    2,
+                                    float(row["foneday_price_eur"]),
+                                    woo_price_ron,
+                                    profit_margin,
+                                    True,
+                                    "added_to_cart",
+                                    f"Pasul 4 - Marjă: {profit_margin:.1f}% - 2 buc",
+                                ),
+                            )
+                            conn.commit()
+                            added += 1
+                            log_event("step4_add", f"Adăugat: {row['sku']} - Marjă: {profit_margin:.1f}%", sku=row['sku'], status="success")
+                        except Exception as e:
+                            conn.rollback()
+                            errors += 1
+                            log_event("step4_error", f"Eroare salvare DB {row['sku']}: {e}", sku=row['sku'], status="error")
+                    else:
+                        errors += 1
+                        log_event("step4_warning", f"Eroare API Foneday: {row['sku']}", sku=row['sku'], status="warning")
+
+                    progress.progress((i + 1) / len(to_send))
+                    time.sleep(0.1)  # Rate limiting
+
+                status.empty()
+                progress.progress(1.0)
+
+                if added:
+                    st.success(
+                        f"✅ **PASUL 4 FINALIZAT:** {added} produse trimise în coș Foneday. Erori: {errors}."
+                    )
+                    log_event("step4_complete", f"{added} produse adăugate, {errors} erori", status="success")
+                else:
+                    st.error(f"❌ Nicio linie nu a fost trimisă. Erori: {errors}.")
+                    log_event("step4_complete", f"Erori: {errors}", status="error")
+
+                cursor.close()
+        else:
+            st.info("Nu este niciun produs selectat pentru trimitere în Foneday.")
+            log_event("step4_complete", "Nu există produse selectate", status="info")
+
+        return len(to_send) if not to_send.empty else 0, 0
+
     except Exception as e:
         error_msg = f"Eroare PASUL 4: {e}"
         st.error(f"❌ {error_msg}")
         log_event("step4_error", error_msg, status="error")
-        
-        # Debug traceback
         import traceback
         st.code(traceback.format_exc())
-        
         return 0, 0
     finally:
         if conn:
             conn.close()
+
 
 
 # ===== SIDEBAR =====
@@ -896,7 +1035,6 @@ page = st.sidebar.radio(
         "💰 Oportunități Profit",
         "📊 Stocuri Critice",
         "🛒 Coș Foneday",
-        "📊 Comparare APEX",
         "🗺️ Mapări",
         "📝 Log"
     ]
@@ -1270,277 +1408,6 @@ elif page == "🗺️ Mapări":
     except Exception as e:
         st.error(f"Eroare: {e}")
         
-elif page == "📊 Comparare APEX":
-    st.title("📊 Comparare prețuri Foneday vs APEX")
-    st.markdown(
-        "Produse din `foneday_inventory` (rezultatul Pasului 3) "
-        "comparate cu prețurile din `apex_normalized` (coloana `cod`)."
-    )
-
-    try:
-        conn = get_db_connection()
-        if not conn:
-            st.error("❌ Nu pot conecta la baza de date.")
-        else:
-            cursor = conn.cursor()
-
-            # 1. Produse disponibile la Foneday + nume produs + preț Woo
-            cursor.execute("""
-                SELECT fi.product_id,
-                       fi.sku              AS my_sku,
-                       p.name              AS product_name,
-                       fi.foneday_sku,
-                       fi.price_eur        AS foneday_price_eur,
-                       wp.regular_price    AS woo_price_ron
-                FROM public.foneday_inventory fi
-                LEFT JOIN product_sku ps
-                       ON fi.sku = ps.sku AND ps.is_primary = TRUE
-                LEFT JOIN product p
-                       ON ps.product_id = p.id
-                LEFT JOIN v_woo_prices wp
-                       ON fi.sku = wp.sku
-                WHERE fi.instock = TRUE
-            """)
-            rows = cursor.fetchall()
-
-            if not rows:
-                st.info("Nu există produse disponibile în `foneday_inventory`. Rulează mai întâi PASUL 3.")
-                cursor.close()
-                conn.close()
-            else:
-                df_foneday = pd.DataFrame(
-                    rows,
-                    columns=[
-                        "product_id",
-                        "sku",
-                        "product_name",
-                        "foneday_sku",
-                        "foneday_price_eur",
-                        "woo_price_ron",
-                    ],
-                )
-
-                # Asigurăm tipuri numerice
-                df_foneday["foneday_price_eur"] = pd.to_numeric(
-                    df_foneday["foneday_price_eur"], errors="coerce"
-                )
-                df_foneday["woo_price_ron"] = pd.to_numeric(
-                    df_foneday["woo_price_ron"], errors="coerce"
-                )
-
-                # 2. Prețurile APEX pentru aceleași SKU-uri (cod = SKU)
-                cursor.execute("""
-                    SELECT an.cod        AS sku,
-                           an.pret_eur  AS apex_price_eur
-                    FROM public.apex_normalized an
-                    WHERE an.cod IS NOT NULL
-                      AND an.cod IN (
-                          SELECT DISTINCT sku
-                          FROM public.foneday_inventory
-                          WHERE instock = TRUE
-                      )
-                """)
-                apex_rows = cursor.fetchall()
-                cursor.close()
-                conn.close()
-
-                df_apex = pd.DataFrame(apex_rows, columns=["sku", "apex_price_eur"])
-                df_apex["apex_price_eur"] = pd.to_numeric(
-                    df_apex["apex_price_eur"], errors="coerce"
-                )
-
-                # 3. Join Foneday + APEX pe SKU
-                df = df_foneday.merge(df_apex, on="sku", how="left")
-
-                # 4. Calcul diferență de preț și marjă Foneday–Woo
-                df["diff_eur"] = df["apex_price_eur"] - df["foneday_price_eur"]
-
-                def cheaper(row):
-                    if pd.isnull(row["apex_price_eur"]):
-                        return "Doar Foneday"
-                    if row["foneday_price_eur"] < row["apex_price_eur"]:
-                        return "Foneday"
-                    if row["apex_price_eur"] < row["foneday_price_eur"]:
-                        return "APEX"
-                    return "Egal"
-
-                df["cheaper_source"] = df.apply(cheaper, axis=1)
-
-                def margin_fw(row):
-                    if pd.isnull(row["woo_price_ron"]) or pd.isnull(row["foneday_price_eur"]):
-                        return None
-                    return calculate_profit_margin(
-                        row["foneday_price_eur"], row["woo_price_ron"]
-                    )
-
-                df["margin_fw"] = df.apply(margin_fw, axis=1)
-
-                # 5. Selectare inițială: Foneday mai ieftin sau doar Foneday
-                df["selected"] = df["cheaper_source"].isin(["Foneday", "Doar Foneday"])
-
-                st.info(f"Găsite {len(df)} produse în `foneday_inventory` pentru comparație.")
-
-                # 6. Filtre UI
-                col1, col2 = st.columns(2)
-                with col1:
-                    show_only_with_apex = st.checkbox("Doar produse care există și în APEX", value=False)
-                with col2:
-                    cheaper_choice = st.selectbox(
-                        "Filtru după sursa mai ieftină",
-                        ["Toate", "Foneday mai ieftin", "APEX mai ieftin", "Doar Foneday"],
-                    )
-
-                df_view = df.copy()
-                if show_only_with_apex:
-                    df_view = df_view[df_view["apex_price_eur"].notnull()]
-
-                if cheaper_choice == "Foneday mai ieftin":
-                    df_view = df_view[df_view["cheaper_source"] == "Foneday"]
-                elif cheaper_choice == "APEX mai ieftin":
-                    df_view = df_view[df_view["cheaper_source"] == "APEX"]
-                elif cheaper_choice == "Doar Foneday":
-                    df_view = df_view[df_view["cheaper_source"] == "Doar Foneday"]
-
-                # 7. Editor cu checkbox "selected"
-                #    (fără Nume APEX și fără coloana diff_eur în afișaj)
-                display_cols = [
-                    "selected",
-                    "sku",
-                    "product_name",
-                    "foneday_sku",
-                    "foneday_price_eur",
-                    "apex_price_eur",
-                    "margin_fw",
-                    "cheaper_source",
-                ]
-
-                df_view_editor = df_view[display_cols].copy()
-
-                edited = st.data_editor(
-                    df_view_editor,
-                    column_config={
-                        "selected": st.column_config.CheckboxColumn(
-                            "✓",
-                            help="Bifează produsele pe care vrei să le trimiți în Foneday",
-                        ),
-                        "sku": "SKU",
-                        "product_name": "Produs (catalogul tău)",
-                        "foneday_sku": "SKU Foneday",
-                        "foneday_price_eur": "Preț Foneday (€)",
-                        "apex_price_eur": "Preț APEX (€)",
-                        "margin_fw": "Marjă Foneday–Woo (%)",
-                        "cheaper_source": "Mai ieftin",
-                    },
-                    hide_index=True,
-                    use_container_width=True,
-                    key="apex_compare_editor",
-                )
-
-                # 8. Luăm direct din DataFrame-ul editat ce este bifat
-                selected_edited = edited[edited["selected"] == True].copy()
-
-                # Join cu df complet pentru a avea și product_id, woo_price_ron etc.
-                to_send = selected_edited.merge(
-                    df,
-                    on=["sku", "foneday_sku", "foneday_price_eur", "apex_price_eur", "cheaper_source", "margin_fw"],
-                    how="left",
-                    suffixes=("", "_orig"),
-                )
-
-                st.markdown("### 🛒 Rezumat selecție")
-                col_a, col_b = st.columns(2)
-                with col_a:
-                    st.metric("Produse selectate", len(to_send))
-                with col_b:
-                    total_est = (to_send["foneday_price_eur"] * 2).sum()
-                    st.metric("Valoare estimată (2 buc/produs)", f"€{total_est:.2f}")
-
-                # 9. Buton: trimite în Foneday ce este bifat
-                if not to_send.empty:
-                    if st.button("🚀 Trimite în coș Foneday produsele selectate", type="primary"):
-                        conn = get_db_connection()
-                        if not conn:
-                            st.error("❌ Nu pot reconecta la baza de date pentru salvarea în coș.")
-                        cursor = conn.cursor()
-
-                        progress = st.progress(0)
-                        status = st.empty()
-                        added = 0
-                        errors = 0
-
-                        for i, row in to_send.reset_index(drop=True).iterrows():
-                            status.info(
-                                f"📦 {i+1}/{len(to_send)} – {row['product_name']} ({row['sku']})"
-                            )
-
-                            woo_price_ron = float(row.get("woo_price_ron", 0) or 0)
-                            profit_margin = (
-                                float(row["margin_fw"])
-                                if row.get("margin_fw") is not None
-                                else calculate_profit_margin(
-                                    row["foneday_price_eur"], woo_price_ron
-                                )
-                            )
-
-                            cart_result = add_to_foneday_cart(
-                                row["foneday_sku"],
-                                2,
-                                f"APEX compare - {row['sku']}",
-                            )
-
-                            if cart_result:
-                                try:
-                                    cursor.execute(
-                                        """
-                                        INSERT INTO public.foneday_cart
-                                            (product_id, sku, foneday_sku, quantity,
-                                             price_eur, woo_price_ron,
-                                             profit_margin, is_profitable,
-                                             status, note)
-                                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                                        """,
-                                        (
-                                            row.get("product_id"),
-                                            row["sku"],
-                                            row["foneday_sku"],
-                                            2,
-                                            float(row["foneday_price_eur"]),
-                                            woo_price_ron,
-                                            profit_margin,
-                                            True,
-                                            "added_to_cart",
-                                            "Trimis din Comparare APEX – 2 buc",
-                                        ),
-                                    )
-                                    conn.commit()
-                                    added += 1
-                                except Exception as e:
-                                    conn.rollback()
-                                    errors += 1
-                                    st.warning(f"Eroare salvare în DB pentru {row['sku']}: {e}")
-                            else:
-                                errors += 1
-                                st.warning(f"Nu s-a putut adăuga în coș: {row['sku']}")
-
-                            progress.progress((i + 1) / len(to_send))
-
-                        status.empty()
-                        progress.progress(1.0)
-
-                        if added:
-                            st.success(
-                                f"✅ Trimise în coș Foneday {added} produse. Erori: {errors}."
-                            )
-                        else:
-                            st.error(f"❌ Nicio linie nu a fost trimisă. Erori: {errors}.")
-
-                        cursor.close()
-                        conn.close()
-                else:
-                    st.info("Nu este niciun produs selectat pentru trimitere în Foneday.")
-
-    except Exception as e:
-        st.error(f"Eroare în pagina «Comparare APEX»: {e}")
 
 elif page == "📝 Log":
     st.title("📝 Log Evenimente")

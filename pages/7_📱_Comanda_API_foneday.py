@@ -826,11 +826,11 @@ def step4_add_to_cart():
 
         # Caută prețuri GSMNET pentru produsele profitabile
         cursor.execute("""
-            SELECT gn.cod AS sku,
-                   gn.pret_eur AS gsmnet_price_eur
+            SELECT gn.sku AS sku,
+                   gn.price_eur AS gsmnet_price_eur
             FROM public.gsmnet_normalized gn
-            WHERE gn.cod IS NOT NULL
-            AND gn.cod IN (
+            WHERE gn.sku IS NOT NULL
+            AND gn.sku IN (
                 SELECT DISTINCT sku
                 FROM public.foneday_inventory
                 WHERE instock = TRUE

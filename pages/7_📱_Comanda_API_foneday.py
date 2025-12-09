@@ -725,7 +725,7 @@ def step3_check_stock_and_prices():
 
 # ============ PASUL 4: Adăugare în Coș ============
 def step4_add_to_cart():
-    """PASUL 4: Verifică profitabilitate, compară cu APEX, și adaugă în coș doar ce alegi"""
+    """PASUL 4: Verifică profitabilitate, compară cu APEX și GSMNET, și adaugă în coș doar ce alegi"""
     conn = None
     try:
         conn = get_db_connection()
@@ -810,7 +810,7 @@ def step4_add_to_cart():
 
         st.info(f"✅ Găsite {len(df_profitable)} produse profitabile (marjă > {(1-MIN_PROFIT_MARGIN)*100:.0f}%) în Foneday")
 
-        # 3. Caută prețuri APEX pentru produsele profitabile
+        # 3. Caută prețuri APEX și GSMNET pentru produsele profitabile
         cursor.execute("""
             SELECT an.cod AS sku,
                    an.pret_eur AS apex_price_eur
@@ -824,6 +824,20 @@ def step4_add_to_cart():
         """)
         apex_rows = cursor.fetchall()
 
+        # Caută prețuri GSMNET pentru produsele profitabile
+        cursor.execute("""
+            SELECT gn.cod AS sku,
+                   gn.pret_eur AS gsmnet_price_eur
+            FROM public.gsmnet_normalized gn
+            WHERE gn.cod IS NOT NULL
+            AND gn.cod IN (
+                SELECT DISTINCT sku
+                FROM public.foneday_inventory
+                WHERE instock = TRUE
+            )
+        """)
+        gsmnet_rows = cursor.fetchall()
+
         # IMPORTANT: NU închidem cursor și conn aici - le lăsăm deschise pentru buton
         cursor.close()
         conn.close()
@@ -833,8 +847,14 @@ def step4_add_to_cart():
             df_apex["apex_price_eur"], errors="coerce"
         )
 
-        # 4. Join Foneday + APEX
+        df_gsmnet = pd.DataFrame(gsmnet_rows, columns=["sku", "gsmnet_price_eur"])
+        df_gsmnet["gsmnet_price_eur"] = pd.to_numeric(
+            df_gsmnet["gsmnet_price_eur"], errors="coerce"
+        )
+
+        # 4. Join Foneday + APEX + GSMNET
         df = df_profitable.merge(df_apex, on="sku", how="left")
+        df = df.merge(df_gsmnet, on="sku", how="left")
 
         # 5. Calcul marjă Foneday-Woo și comparație cu APEX
         def margin_fw(row):
@@ -847,22 +867,40 @@ def step4_add_to_cart():
         df["margin_fw"] = df.apply(margin_fw, axis=1)
 
         def cheaper(row):
-            if pd.isnull(row["apex_price_eur"]):
-                return "Doar Foneday"
-            if row["foneday_price_eur"] < row["apex_price_eur"]:
-                return "Foneday"
-            if row["apex_price_eur"] < row["foneday_price_eur"]:
-                return "APEX"
-            return "Egal"
+            # Colectăm prețurile disponibile
+            prices = {}
+            if not pd.isnull(row["foneday_price_eur"]) and row["foneday_price_eur"] > 0:
+                prices["Foneday"] = row["foneday_price_eur"]
+            if not pd.isnull(row["apex_price_eur"]) and row["apex_price_eur"] > 0:
+                prices["APEX"] = row["apex_price_eur"]
+            if not pd.isnull(row["gsmnet_price_eur"]) and row["gsmnet_price_eur"] > 0:
+                prices["GSMNET"] = row["gsmnet_price_eur"]
+
+            # Dacă nu avem prețuri de comparat
+            if len(prices) == 0:
+                return "N/A"
+            if len(prices) == 1:
+                return f"Doar {list(prices.keys())[0]}"
+
+            # Găsim furnizorul cu prețul minim
+            min_supplier = min(prices, key=prices.get)
+            min_price = prices[min_supplier]
+
+            # Verificăm dacă sunt mai mulți cu același preț minim
+            min_suppliers = [k for k, v in prices.items() if v == min_price]
+            if len(min_suppliers) > 1:
+                return " = ".join(min_suppliers)
+
+            return min_supplier
 
         df["cheaper_source"] = df.apply(cheaper, axis=1)
 
-        # 6. PRE-SELECȚIE: bifează automat Foneday < APEX SAU doar Foneday
-        df["selected"] = df["cheaper_source"].isin(["Foneday", "Doar Foneday"])
+        # 6. PRE-SELECȚIE: bifează automat când Foneday e cel mai ieftin sau singur disponibil
+        df["selected"] = df["cheaper_source"].str.contains("Foneday", na=False)
 
         # 7. Afișare tabel editabil
         st.markdown("---")
-        st.markdown("### 📊 Produse profitabile - Comparație Foneday vs APEX")
+        st.markdown("### 📊 Produse profitabile - Comparație Foneday vs APEX vs GSMNET")
         st.markdown(f"Bifează produsele pe care vrei să le adaugi în coșul Foneday **(2 buc fiecare)**")
 
         display_cols = [
@@ -873,6 +911,7 @@ def step4_add_to_cart():
             "foneday_price_eur",
             "woo_price_ron",
             "apex_price_eur",
+            "gsmnet_price_eur",
             "margin_fw",
             "cheaper_source",
             "is_on_sale",
@@ -893,6 +932,7 @@ def step4_add_to_cart():
                 "foneday_price_eur": "Preț Foneday (€)",
                 "woo_price_ron": "Preț Woo (RON – efectiv)",
                 "apex_price_eur": "Preț APEX (€)",
+                "gsmnet_price_eur": "Preț GSMNET (€)",
                 "margin_fw": "Marjă Foneday–Woo (%)",
                 "cheaper_source": "Mai ieftin",
                 "is_on_sale": st.column_config.CheckboxColumn(
@@ -1323,7 +1363,7 @@ foneday_cart + Coș Foneday (pe site)
     with tab4:
         st.markdown("## 🛒 PASUL 4: Adăugare Automată în Coș")
         st.info(
-            "Calculează profitabilitatea, compară cu APEX și îți arată un tabel de selecție. "
+            "Calculează profitabilitatea, compară cu APEX și GSMNET, și îți arată un tabel de selecție. "
             "Doar produsele bifate vor fi trimise în coșul Foneday (2 buc/produs)."
         )
 
